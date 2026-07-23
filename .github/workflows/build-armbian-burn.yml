@@ -499,13 +499,14 @@ jobs:
           echo "Rootfs unmounted"
 
           # V4 修复: 恢复 /dev/null 权限 (sudo 操作可能破坏 /dev/null 权限)
-          sudo chmod 666 /dev/null 2>/dev/null || true
+          # 注意: 不能用 2>/dev/null 因为 /dev/null 本身就是坏的
+          sudo chmod 666 /dev/null || true
 
           # 重新缩小 rootfs
           sudo e2fsck -fy system.PARTITION 2>&1 | tail -3
           sudo resize2fs -M system.PARTITION 2>&1
-          BLOCKS=$(sudo dumpe2fs -h system.PARTITION 2>/dev/null | grep 'Block count' | awk '{print $3}')
-          BLKSIZE=$(sudo dumpe2fs -h system.PARTITION 2>/dev/null | grep 'Block size' | awk '{print $3}')
+          BLOCKS=$(sudo dumpe2fs -h system.PARTITION 2>&1 | grep 'Block count' | awk '{print $3}')
+          BLKSIZE=$(sudo dumpe2fs -h system.PARTITION 2>&1 | grep 'Block size' | awk '{print $3}')
           FILE_SIZE=$((BLOCKS * BLKSIZE))
           echo "Rootfs shrunk: BLOCKS=$BLOCKS BLKSIZE=$BLKSIZE FILE_SIZE=$FILE_SIZE"
           # V4 安全检查: 确保 FILE_SIZE 非零, 防止 truncate -s 0 截断文件
@@ -581,11 +582,14 @@ jobs:
       - name: Create GitHub Release
         if: github.event.inputs.create_release != 'false'
         run: |
+          # V4 修复: 恢复 /dev/null 权限 (上一步 sudo 操作可能破坏)
+          sudo chmod 666 /dev/null || true
+
           TAG="v4.$(date +%Y%m%d)-${OPHUB_SOC}-$(echo $GITHUB_SHA | cut -c1-7)"
           echo "Creating release: $TAG"
 
           # 获取 rootfs UUID
-          ROOT_UUID=$(dumpe2fs -h system.PARTITION 2>/dev/null | grep -oP 'UUID:\s+\K[a-f0-9-]+')
+          ROOT_UUID=$(sudo dumpe2fs -h system.PARTITION 2>&1 | grep -oP 'UUID:\s+\K[a-f0-9-]+' || echo "unknown")
 
           # 生成 release notes 文件
           cat > /tmp/release-notes.md << 'RNOTES'
