@@ -226,16 +226,25 @@ jobs:
             # ophub 镜像命名: Armbian_XX.XX.X_amlogic_s905l3b_bullseye_6.1.174_server.img.gz
             URL=$(curl -s "https://api.github.com/repos/ophub/amlogic-s9xxx-armbian/releases?per_page=50" \
               | python3 -c "
-          import json, sys
+          import json, sys, re
           soc = '${OPHUB_SOC}'
           kernel = '${KERNEL_VERSION}'
           releases = json.load(sys.stdin)
+          # 构建精确的内核版本正则: 6.1 → 匹配 6.1.xxx 但不匹配 6.10/6.11/6.12
+          if kernel:
+              # 将 '6.1' 转为正则 r'6\.1\.\d+' 精确匹配 6.1.x
+              kernel_re = re.compile(r'^' + re.escape(kernel) + r'\.\d+')
+          else:
+              kernel_re = None
           for rel in releases:
               for asset in rel.get('assets', []):
                   name = asset.get('name', '')
                   if soc in name and name.endswith('.img.gz') and 'server' in name:
-                      if kernel and kernel not in name:
-                          continue
+                      # 提取文件名中的内核版本号 (如 _6.1.174_)
+                      m = re.search(r'_(\d+\.\d+\.\d+)_', name)
+                      if kernel_re and m:
+                          if not kernel_re.match(m.group(1) + ' '):
+                              continue
                       print(asset['browser_download_url'])
                       sys.exit(0)
           # 如果指定内核版本没找到, 回退到任意版本
@@ -263,10 +272,11 @@ jobs:
         run: |
           URL="${{ steps.ophub_url.outputs.url }}"
           echo "Downloading: $URL"
-          # 尝试直连，失败则用代理
+          # 尝试直连，失败则用代理 (代理需要完整 URL)
           wget -q --timeout=300 -O ophub.img.gz "$URL" || \
           wget -q --timeout=300 -O ophub.img.gz "https://mirror.ghproxy.com/$URL" || \
-          wget -q --timeout=300 -O ophub.img.gz "https://gh-proxy.com/$URL"
+          wget -q --timeout=300 -O ophub.img.gz "https://gh-proxy.com/$URL" || \
+          wget -q --timeout=300 -O ophub.img.gz "https://ghfast.top/$URL"
 
           ls -lh ophub.img.gz
           echo "Decompressing..."
@@ -349,27 +359,38 @@ jobs:
             echo "=== Creating B860AV2.1-A custom DTB (eMMC timing fix) ==="
             # 反编译 DTB
             dtc -I dtb -O dts "$SOURCE_DTB" -o /tmp/custom.dts 2>/dev/null
+            # 记录原始 eMMC 频率 (用于验证修改)
+            ORIG_FREQ=$(grep -oP 'max-frequency = <\K[0-9a-f]+' /tmp/custom.dts | head -1 || echo "unknown")
+            echo "  Original eMMC max-frequency: $ORIG_FREQ"
             # 修改 eMMC 节点: 降低 max-frequency 到 50MHz, 移除 HS200/DDR
             # 0xbebc200 = 200000000 (200MHz), 0x2faf080 = 50000000 (50MHz)
-            # 移除 mmc-hs200-1_8v 和 mmc-ddr-1_8v 属性
             sed -i 's/0xbebc200/0x2faf080/g' /tmp/custom.dts  # 200MHz -> 50MHz
             # 如果 DTB 中 max-frequency 不是用十六进制而是十进制
             sed -i 's/max-frequency = <200000000>/max-frequency = <50000000>/g' /tmp/custom.dts
-            # 移除 HS200 和 DDR (将这些行注释掉或删除)
+            # 移除 HS200 和 DDR (将这些行删除)
             sed -i '/mmc-hs200-1_8v/d' /tmp/custom.dts
             sed -i '/mmc-ddr-1_8v/d' /tmp/custom.dts
-            # 重新编译
-            dtc -I dts -O dtb /tmp/custom.dts -o "/tmp/${CUSTOM_DTB}" 2>/dev/null
-            if [ -s "/tmp/${CUSTOM_DTB}" ]; then
-              mcopy -i boot.PARTITION "/tmp/${CUSTOM_DTB}" ::dtb/amlogic/${CUSTOM_DTB}
-              echo "  Created ${CUSTOM_DTB} (eMMC 50MHz, no HS200/DDR)"
-              # 将默认 DTB 切换为定制版本
-              DEFAULT_DTB="$CUSTOM_DTB"
-              echo "  Default DTB switched to ${CUSTOM_DTB}"
+            # 验证修改是否生效
+            NEW_FREQ=$(grep -oP 'max-frequency = <\K[0-9a-f]+' /tmp/custom.dts | head -1 || echo "unknown")
+            HS200_REMAIN=$(grep -c 'mmc-hs200-1_8v' /tmp/custom.dts || echo "0")
+            echo "  New eMMC max-frequency: $NEW_FREQ (orig: $ORIG_FREQ)"
+            echo "  HS200 removed: $([ "$HS200_REMAIN" = "0" ] && echo 'YES' || echo 'NO')"
+            if [ "$NEW_FREQ" = "$ORIG_FREQ" ] && [ "$ORIG_FREQ" != "unknown" ]; then
+              echo "  WARNING: max-frequency not changed! sed pattern may not match."
+              echo "  Falling back to e900v22e DTB"
             else
-              echo "  WARNING: Custom DTB compilation failed, using e900v22e"
+              # 重新编译
+              dtc -I dts -O dtb /tmp/custom.dts -o "/tmp/${CUSTOM_DTB}" 2>/dev/null
+              if [ -s "/tmp/${CUSTOM_DTB}" ]; then
+                mcopy -i boot.PARTITION "/tmp/${CUSTOM_DTB}" ::dtb/amlogic/${CUSTOM_DTB}
+                echo "  Created ${CUSTOM_DTB} (eMMC 50MHz, no HS200/DDR)"
+                # 将默认 DTB 切换为定制版本
+                DEFAULT_DTB="$CUSTOM_DTB"
+                echo "  Default DTB switched to ${CUSTOM_DTB}"
+              else
+                echo "  WARNING: Custom DTB compilation failed, using e900v22e"
+              fi
             fi
-          fi
 
           # V4: 生成 uEnv.txt (使用最终 DEFAULT_DTB, 包含 clk_ignore_unused + earlycon)
           printf 'LINUX=/zImage\nINITRD=/uInitrd\nFDT=dtb/amlogic/%s\nAPPEND=root=UUID=%s rootflags=data=writeback rw rootwait rootfstype=ext4 console=ttyAML0,115200n8 console=tty0 no_console_suspend consoleblank=0 clk_ignore_unused earlycon fsck.fix=yes fsck.repair=yes net.ifnames=0 max_loop=128 loglevel=1\n' "${DEFAULT_DTB}" "${ROOT_UUID}" > /tmp/uEnv.txt
@@ -546,6 +567,8 @@ jobs:
           # V6: WiFi 脚本权限
           sudo chmod 755 /mnt/rootfs/usr/local/bin/wifi-setup.sh 2>/dev/null
           sudo chmod 755 /mnt/rootfs/usr/local/bin/wifi-connect.sh 2>/dev/null
+          # V6.1: 系统优化脚本权限
+          sudo chmod 755 /mnt/rootfs/usr/local/bin/optimize-system.sh 2>/dev/null
 
           # 启用 systemd 服务 (创建符号链接)
           sudo mkdir -p /mnt/rootfs/etc/systemd/system/multi-user.target.wants
@@ -560,6 +583,9 @@ jobs:
           # V6: WiFi 自动检测服务
           sudo ln -sf /etc/systemd/system/wifi-setup.service \
             /mnt/rootfs/etc/systemd/system/multi-user.target.wants/wifi-setup.service
+          # V6.1: 系统优化服务
+          sudo ln -sf /etc/systemd/system/system-optimization.service \
+            /mnt/rootfs/etc/systemd/system/multi-user.target.wants/system-optimization.service
           echo "Systemd services enabled"
 
           # 优化 fstab (ophub 通常已优化, 仅在未优化时处理)
@@ -594,6 +620,10 @@ jobs:
           sudo ls -la /mnt/rootfs/etc/systemd/system/wifi-setup.service || echo "MISSING: wifi-setup.service"
           sudo ls -la /mnt/rootfs/lib/firmware/ssv6051-sw.bin || echo "MISSING: ssv6051-sw.bin"
           sudo ls -la /mnt/rootfs/etc/NetworkManager/conf.d/20-wifi-managed.conf || echo "MISSING: 20-wifi-managed.conf"
+          # V6.1: 系统优化文件验证
+          sudo ls -la /mnt/rootfs/usr/local/bin/optimize-system.sh || echo "MISSING: optimize-system.sh"
+          sudo ls -la /mnt/rootfs/etc/systemd/system/system-optimization.service || echo "MISSING: system-optimization.service"
+          sudo ls -la /mnt/rootfs/etc/logrotate.d/b860av21-scripts || echo "MISSING: logrotate config"
           sudo ls -la /mnt/rootfs/etc/systemd/system/multi-user.target.wants/
 
           # 同步并卸载 (关键操作: 失败则退出)
@@ -712,11 +742,18 @@ jobs:
           cat > /tmp/release-notes.md << 'RNOTES'
           ## B860AV2.1-A Armbian 线刷镜像 V6.1
 
-          ### V6.1 改进 (内核锁定 6.1.y LTS + 版本号带日期)
+          ### V6.1 改进 (内核锁定 6.1.y LTS + 版本号带日期 + 系统优化)
           - 锁定内核版本为 6.1.y LTS (通过 ophub 镜像文件名过滤)
           - Release 标签格式: v6.1.YYYYMMDD-SoC-SHA (如 v6.1.20260723-s905l3b-abc1234)
           - 修复内核版本过滤逻辑: 精确匹配文件名中的 6.1.x 版本号
           - 回退机制: 若指定内核版本镜像不存在, 自动回退到最新可用版本
+          - 系统优化脚本 (optimize-system.sh): zram swap + CPU 调频 + tmpfs + eMMC 写入保护
+          - zram swap: 内存 50% 大小, lz4 压缩, 减少 eMMC 写入
+          - CPU 调频: ondemand/schedutil, up_threshold=50% (平衡性能与功耗)
+          - tmpfs /tmp: 256MB, 减少 eMMC 写入磨损
+          - eMMC 写入保护: dirty_ratio 优化 + journald volatile 存储 + logrotate 日志轮转
+          - fix-gxl-eth.sh 回退优先 full-duplex (吞吐量翻倍), half-duplex 兜底
+          - first-boot-check.sh 动态检测分区设备 (不再硬编码 /dev/mmcblk0p1/p2)
 
           ### V6 改进 (WiFi 内置适配 — 已包含)
           - 内置 SSV6051/SV6256P WiFi 固件 (硅谷数模, B860AV2.1 固件 ssv_dump_flash 服务对应)
@@ -820,7 +857,7 @@ jobs:
           echo "" >> /tmp/release-notes.md
           echo "### 构建信息" >> /tmp/release-notes.md
           echo "- 构建时间: $(date -u '+%Y-%m-%d %H:%M UTC')" >> /tmp/release-notes.md
-          echo "- 版本: V6.1 (内核 6.1.y LTS 锁定 + WiFi 内置适配 + 定制 DTB + eMMC 50MHz)" >> /tmp/release-notes.md
+          echo "- 版本: V6.1 (内核 6.1.y LTS + WiFi + 定制 DTB + eMMC 50MHz + 系统优化)" >> /tmp/release-notes.md
           echo "- U-Boot: ${UBOOT_VERSION} (主线, p212_defconfig)" >> /tmp/release-notes.md
           echo "- ophub SoC: ${OPHUB_SOC}" >> /tmp/release-notes.md
           echo "- 内核版本: ${KERNEL_VERSION}.y (LTS, 锁定)" >> /tmp/release-notes.md

@@ -55,13 +55,20 @@ for i in $(seq 1 $MAX_RETRIES); do
     sleep $RETRY_DELAY
 done
 
-# 最终回退: 强制 100Mbps 半双工, 然后重新启用自动协商
-log "Autoneg failed, trying forced speed fallback..."
+# 最终回退: 强制 100Mbps 全双工 (比半双工吞吐量翻倍, 大多数 PHY 支持)
+log "Autoneg failed, trying forced speed fallback (100Mbps full-duplex)..."
 if command -v ethtool >/dev/null 2>&1; then
-    ethtool -s eth0 speed 100 duplex half autoneg off 2>/dev/null
+    ethtool -s eth0 speed 100 duplex full autoneg off 2>/dev/null
     sleep 2
+    # 重新启用自动协商, 让 PHY 重新协商到最佳模式
     ethtool -s eth0 autoneg on 2>/dev/null
     sleep 3
+    # 如果重新协商后链路仍未建立, 回退到半双工 (兼容性最终兜底)
+    if ! check_link; then
+        log "Full-duplex fallback failed, trying half-duplex..."
+        ethtool -s eth0 speed 100 duplex half autoneg off 2>/dev/null
+        sleep 2
+    fi
 else
     # 无 ethtool: 多次 link down/up
     for j in 1 2 3; do

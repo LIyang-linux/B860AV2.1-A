@@ -1,0 +1,17 @@
+# B860AV2.1-A 自定义脚本日志轮转
+# 防止日志文件无限增长占满 eMMC
+
+/var/log/first-boot-check.log
+/var/log/optimize-system.log
+/var/log/wifi-setup.log
+/var/log/eth-monitor.log
+/var/log/mac-setup.log {
+    weekly
+    rotate 2
+    maxsize 1M
+    missingok
+    notifempty
+    compress
+    delaycompress
+    copytruncate
+}

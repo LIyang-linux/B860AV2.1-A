@@ -1,0 +1,15 @@
+[Unit]
+Description=B860AV2.1-A System Optimization (zram/CPU governor/tmpfs/eMMC protect)
+After=local-fs.target
+Before=multi-user.target
+ConditionPathExists=/usr/local/bin/optimize-system.sh
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/optimize-system.sh
+RemainAfterExit=yes
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
