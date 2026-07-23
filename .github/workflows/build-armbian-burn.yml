@@ -359,6 +359,29 @@ jobs:
           set -e
           echo "=== Injecting network reliability scripts ==="
 
+          # V3 关键修复: 用实际 rootfs UUID 更新 boot.PARTITION
+          # ophub uEnv.txt 中的 UUID 可能与实际 ext4 UUID 不匹配
+          ACTUAL_UUID=$(dumpe2fs -h system.PARTITION 2>/dev/null | grep -oP 'UUID:\s+\K[a-f0-9-]+')
+          echo "Actual rootfs UUID: $ACTUAL_UUID"
+          if [ -n "$ACTUAL_UUID" ]; then
+            echo "Updating boot.PARTITION with correct UUID..."
+            # 更新 extlinux.conf
+            mtype -i boot.PARTITION ::extlinux/extlinux.conf 2>/dev/null | \
+              sed "s|root=UUID=[a-f0-9-]*|root=UUID=$ACTUAL_UUID|" > /tmp/extlinux.conf
+            mcopy -i boot.PARTITION /tmp/extlinux.conf ::extlinux/extlinux.conf
+            # 更新 uEnv.txt
+            mtype -i boot.PARTITION ::uEnv.txt 2>/dev/null | \
+              sed "s|root=UUID=[a-f0-9-]*|root=UUID=$ACTUAL_UUID|" > /tmp/uEnv.txt
+            mcopy -i boot.PARTITION /tmp/uEnv.txt ::uEnv.txt
+            # 更新 boot.ini (如果包含 UUID)
+            if mtype -i boot.PARTITION ::boot.ini 2>/dev/null | grep -q "root=UUID="; then
+              mtype -i boot.PARTITION ::boot.ini 2>/dev/null | \
+                sed "s|root=UUID=[a-f0-9-]*|root=UUID=$ACTUAL_UUID|" > /tmp/boot.ini
+              mcopy -i boot.PARTITION /tmp/boot.ini ::boot.ini
+            fi
+            echo "UUID updated in boot.PARTITION"
+          fi
+
           # 扩展 rootfs 增加 50MB 空间用于注入
           e2fsck -fy system.PARTITION 2>&1 | tail -3
           CURRENT_BLOCKS=$(dumpe2fs -h system.PARTITION 2>/dev/null | grep 'Block count' | awk '{print $3}')
@@ -393,16 +416,19 @@ jobs:
           sudo ln -sf /etc/systemd/system/mac-setup.service \
             /mnt/rootfs/etc/systemd/system/multi-user.target.wants/mac-setup.service
 
-          # 优化 fstab: 添加 noatime, commit=600, errors=remount-ro
+          # 优化 fstab: 添加 noatime, commit=600 (ophub 可能已优化)
           if [ -f /mnt/rootfs/etc/fstab ]; then
             echo "=== Original fstab ==="
             cat /mnt/rootfs/etc/fstab
-            # 在根分区挂载选项中添加优化参数
-            sudo sed -i 's|errors=remount-ro|errors=remount-ro,noatime,nodiratime,commit=600|g' /mnt/rootfs/etc/fstab
-            # 如果没有 errors=remount-ro, 在 defaults 后添加
-            sudo sed -i 's|\(/ .*defaults\)\(|\1,noatime,commit=600(|g' /mnt/rootfs/etc/fstab
-            echo "=== Optimized fstab ==="
-            cat /mnt/rootfs/etc/fstab
+            # 仅在未包含 commit=600 时添加优化参数
+            if ! grep -q "commit=600" /mnt/rootfs/etc/fstab; then
+              sudo sed -i 's|errors=remount-ro|errors=remount-ro,noatime,nodiratime,commit=600|g' /mnt/rootfs/etc/fstab || true
+              sudo sed -i 's|\(/ .*defaults\)|\1,noatime,commit=600|g' /mnt/rootfs/etc/fstab || true
+              echo "=== Optimized fstab ==="
+              cat /mnt/rootfs/etc/fstab
+            else
+              echo "fstab already optimized, skipping"
+            fi
           fi
 
           # 设置 NetworkManager 配置文件权限
