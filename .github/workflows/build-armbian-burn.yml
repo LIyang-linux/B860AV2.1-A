@@ -283,7 +283,7 @@ jobs:
 
           # 获取第一个分区 (FAT32 boot) 的起始扇区和大小
           BOOT_START=$(sfdisk -d ophub.img 2>/dev/null | grep "ophub.img1" | grep -oP 'start=\s*\K\d+')
-          BOOT_COUNT=$(sfdisk -d ophub.img 2>/dev/null | grep "ophub.img1" | grep -oP'size=\s*\K\d+')
+          BOOT_COUNT=$(sfdisk -d ophub.img 2>/dev/null | grep "ophub.img1" | grep -oP 'size=\s*\K\d+')
           echo "Boot partition: start=$BOOT_START sectors, size=$BOOT_COUNT sectors"
 
           # 提取 FAT32 boot 分区
