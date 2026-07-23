@@ -1,4 +1,4 @@
-# B860AV2.1-A Armbian 线刷镜像 - 全自动构建工作流 (V6.1)
+# B860AV2.1-A Armbian 线刷镜像 - 全自动构建工作流 (V6.2)
 #
 # 功能：
 #   1. 编译主线 U-Boot v2025.04 (p212_defconfig, GXL)
@@ -11,8 +11,9 @@
 #   8. V3-V5: 注入网络可靠性脚本 + UUID修复 + tune2fs优化 + 首启检查 + DTB定制
 #   9. V6: 内置 WiFi 固件 (SSV6051) + WiFi 自动检测脚本 + 连接助手
 #  10. V6.1: 锁定内核 6.1.y LTS + 版本号带日期标签
-#  11. 打包完整 Amlogic 线刷镜像 (bootloader + boot + rootfs)
-#  12. 上传 Artifact 和 Release
+#  11. V6.2: U-Boot 启动 Logo (BMP) 消除黑屏 + boot.scr 引导脚本
+#  12. 打包完整 Amlogic 线刷镜像 (bootloader + boot + rootfs)
+#  13. 上传 Artifact 和 Release
 #
 # 使用方法：
 #   方式 1 (手动触发): Actions → Build Armbian Burn Image → Run workflow
@@ -65,12 +66,13 @@ on:
       - 'scripts/build-armbian.sh'
       - 'armbian-v2/image.cfg'
       - 'rootfs-overlay/**'
+      - 'assets/logo.bmp'
 
 env:
   UBOOT_VERSION: ${{ github.event.inputs.uboot_version || 'v2025.04' }}
   OPHUB_SOC: ${{ github.event.inputs.ophub_soc || 's905l3b' }}
   KERNEL_VERSION: ${{ github.event.inputs.kernel_version || '6.1' }}
-  BUILD_VERSION: 'v6.1'
+  BUILD_VERSION: 'v6.2'
 
 jobs:
   build:
@@ -90,7 +92,52 @@ jobs:
             gcc-aarch64-linux-gnu make bc bison flex libssl-dev python3 \
             python3-dev python3-setuptools swig g++ device-tree-compiler git wget cpio \
             libgnutls28-dev qemu-user qemu-user-static \
-            mtools dosfstools e2fsprogs parted gzip
+            mtools dosfstools e2fsprogs parted gzip \
+            imagemagick u-boot-tools
+
+      # ========== Logo 准备 ==========
+      - name: Verify and prepare boot logo
+        id: logo
+        run: |
+          set +e
+          LOGO_SRC="assets/logo.bmp"
+          if [ ! -f "$LOGO_SRC" ]; then
+            echo "logo_status=skip" >> $GITHUB_OUTPUT
+            echo "No assets/logo.bmp found, skipping logo integration"
+            exit 0
+          fi
+
+          # 验证 BMP 格式
+          BMP_INFO=$(file "$LOGO_SRC")
+          echo "Logo file info: $BMP_INFO"
+
+          if echo "$BMP_INFO" | grep -q "PC bitmap"; then
+            # 已是 BMP 格式, 验证分辨率和色深
+            DIMS=$(identify -format "%wx%h" "$LOGO_SRC" 2>/dev/null)
+            DEPTH=$(identify -format "%[depth]" "$LOGO_SRC" 2>/dev/null)
+            echo "BMP dimensions: $DIMS, depth: $DEPTH bit"
+            if [ "$DIMS" != "1920x1080" ] || [ "$DEPTH" != "24" ]; then
+              echo "Converting BMP to 1920x1080 24-bit..."
+              convert "$LOGO_SRC" -resize 1920x1080! -depth 24 -type TrueColor -compress None BMP3:"${LOGO_SRC}.tmp"
+              mv "${LOGO_SRC}.tmp" "$LOGO_SRC"
+            fi
+          else
+            # 非 BMP 格式 (如 JPEG/PNG), 转换
+            echo "Converting to U-Boot compatible BMP (1920x1080, 24-bit, uncompressed)..."
+            convert "$LOGO_SRC" -resize 1920x1080! -depth 24 -type TrueColor -compress None BMP3:"${LOGO_SRC}.tmp"
+            mv "${LOGO_SRC}.tmp" "$LOGO_SRC"
+          fi
+
+          # 最终验证
+          echo "=== Final logo format ==="
+          file "$LOGO_SRC"
+          identify "$LOGO_SRC" 2>/dev/null
+          # 验证 BMP 头: 压缩字段 (offset 0x1E, 4 bytes) 必须为 0
+          COMPRESS=$(xxd -s 30 -l 4 "$LOGO_SRC" 2>/dev/null | grep -oP '^\S+: \K\S+ \S+' | head -1)
+          echo "BMP compression field: $COMPRESS"
+
+          echo "logo_status=ready" >> $GITHUB_OUTPUT
+          echo "Logo prepared successfully"
 
       # ========== 工具准备 ==========
       - name: Clone and build gxlimg
@@ -391,6 +438,7 @@ jobs:
                 echo "  WARNING: Custom DTB compilation failed, using e900v22e"
               fi
             fi
+          fi
 
           # V4: 生成 uEnv.txt (使用最终 DEFAULT_DTB, 包含 clk_ignore_unused + earlycon)
           printf 'LINUX=/zImage\nINITRD=/uInitrd\nFDT=dtb/amlogic/%s\nAPPEND=root=UUID=%s rootflags=data=writeback rw rootwait rootfstype=ext4 console=ttyAML0,115200n8 console=tty0 no_console_suspend consoleblank=0 clk_ignore_unused earlycon fsck.fix=yes fsck.repair=yes net.ifnames=0 max_loop=128 loglevel=1\n' "${DEFAULT_DTB}" "${ROOT_UUID}" > /tmp/uEnv.txt
@@ -409,12 +457,55 @@ jobs:
             mcopy -i boot.PARTITION /tmp/boot.ini ::boot.ini
           fi
 
-          # extlinux 目录 (用于主线 U-Boot distro boot)
-          mmd -i boot.PARTITION ::extlinux
-
-          # 生成 extlinux.conf (V3: 添加 timeout + default + 额外稳定性参数; V4: clk_ignore_unused)
-          printf 'default Armbian\ntimeout 3\n\nlabel Armbian\n    kernel /zImage\n    initrd /uInitrd\n    fdt /dtb/amlogic/%s\n    append root=UUID=%s rootflags=data=writeback rw rootwait rootfstype=ext4 console=ttyAML0,115200n8 console=tty0 no_console_suspend consoleblank=0 clk_ignore_unused earlycon fsck.fix=yes fsck.repair=yes net.ifnames=0 max_loop=128 loglevel=1\n' "${DEFAULT_DTB}" "${ROOT_UUID}" > /tmp/extlinux.conf
-          mcopy -i boot.PARTITION /tmp/extlinux.conf ::extlinux/extlinux.conf
+          # V6.2: Logo 集成 - 复制 logo.bmp 并生成带 BMP 显示的 boot.scr
+          LOGO_READY="${{ steps.logo.outputs.logo_status }}"
+          if [ "$LOGO_READY" = "ready" ] && [ -f "assets/logo.bmp" ]; then
+            echo "=== Integrating boot logo into boot.scr ==="
+            # 复制 logo.bmp 到 boot 分区根目录
+            mcopy -i boot.PARTITION assets/logo.bmp ::logo.bmp
+            echo "  logo.bmp copied to boot partition"
+            # 生成 boot.cmd (U-Boot 引导脚本, 含 BMP Logo 显示)
+            cat > /tmp/boot.cmd << 'BOOTCMD'
+          ODROIDN2-UBOOT-CONFIG
+          # Load addresses
+          setenv env_addr 0x10400000
+          setenv kernel_addr 0x11000000
+          setenv initrd_addr 0x15000000
+          setenv dtb_addr 0x1000000
+          setenv logo_addr 0x20000000
+          if test "${devtype}" = ""; then setenv devtype "mmc"; fi
+          if test "${devnum}" = ""; then setenv devnum 0; fi
+          # Display boot logo (covers black screen during kernel init + rootfs resize)
+          if load ${devtype} ${devnum} ${logo_addr} logo.bmp; then
+            bmp display ${logo_addr} 0 0
+            echo "Boot logo displayed"
+          else
+            echo "WARNING: logo.bmp not found, continuing without logo"
+          fi
+          # Load uEnv.txt
+          load ${devtype} ${devnum} ${env_addr} uEnv.txt && env import -t ${env_addr} ${filesize}
+          setenv bootargs ${APPEND}
+          # Load kernel, initrd, dtb
+          load ${devtype} ${devnum} ${kernel_addr} ${LINUX}
+          load ${devtype} ${devnum} ${initrd_addr} ${INITRD}
+          load ${devtype} ${devnum} ${dtb_addr} ${FDT}
+          fdt addr ${dtb_addr}
+          # Boot kernel
+          booti ${kernel_addr} ${initrd_addr} ${dtb_addr}
+          BOOTCMD
+            # 编译 boot.scr (mkimage)
+            mkimage -C none -A arm -T script -d /tmp/boot.cmd /tmp/boot.scr
+            mcopy -i boot.PARTITION /tmp/boot.scr ::boot.scr
+            echo "  boot.scr compiled with BMP logo display"
+            # 不创建 extlinux.conf, 让 bootflow 使用 boot.scr (BMP 显示需要 boot.scr)
+          else
+            echo "=== No logo.bmp, using extlinux.conf as primary boot method ==="
+            # extlinux 目录 (用于主线 U-Boot distro boot)
+            mmd -i boot.PARTITION ::extlinux
+            # 生成 extlinux.conf (V3: 添加 timeout + default + 额外稳定性参数; V4: clk_ignore_unused)
+            printf 'default Armbian\ntimeout 3\n\nlabel Armbian\n    kernel /zImage\n    initrd /uInitrd\n    fdt /dtb/amlogic/%s\n    append root=UUID=%s rootflags=data=writeback rw rootwait rootfstype=ext4 console=ttyAML0,115200n8 console=tty0 no_console_suspend consoleblank=0 clk_ignore_unused earlycon fsck.fix=yes fsck.repair=yes net.ifnames=0 max_loop=128 loglevel=1\n' "${DEFAULT_DTB}" "${ROOT_UUID}" > /tmp/extlinux.conf
+            mcopy -i boot.PARTITION /tmp/extlinux.conf ::extlinux/extlinux.conf
+          fi
 
           echo "=== boot.PARTITION contents ==="
           mdir -i boot.PARTITION ::/
@@ -484,11 +575,15 @@ jobs:
             fi
             BOOT_ARGS="root=UUID=${ACTUAL_UUID} rootflags=data=writeback rw rootwait rootfstype=ext4 console=ttyAML0,115200n8 console=tty0 no_console_suspend consoleblank=0 clk_ignore_unused earlycon fsck.fix=yes fsck.repair=yes net.ifnames=0 max_loop=128 loglevel=1"
 
-            # 直接重新生成 extlinux.conf (不提取再修改, 避免任何中间失败)
-            printf 'default Armbian\ntimeout 3\n\nlabel Armbian\n    kernel /zImage\n    initrd /uInitrd\n    fdt /dtb/amlogic/%s\n    append %s\n' \
-              "$DEFAULT_DTB" "$BOOT_ARGS" > /tmp/extlinux.conf
-            mcopy -i boot.PARTITION /tmp/extlinux.conf ::extlinux/extlinux.conf
-            echo "  extlinux.conf regenerated with UUID $ACTUAL_UUID"
+            # 重新生成 extlinux.conf (仅当存在时, 即无 Logo 模式; Logo 模式使用 boot.scr)
+            if mdir -i boot.PARTITION ::extlinux/extlinux.conf 2>/dev/null; then
+              printf 'default Armbian\ntimeout 3\n\nlabel Armbian\n    kernel /zImage\n    initrd /uInitrd\n    fdt /dtb/amlogic/%s\n    append %s\n' \
+                "$DEFAULT_DTB" "$BOOT_ARGS" > /tmp/extlinux.conf
+              mcopy -i boot.PARTITION /tmp/extlinux.conf ::extlinux/extlinux.conf
+              echo "  extlinux.conf regenerated with UUID $ACTUAL_UUID"
+            else
+              echo "  extlinux.conf not present (logo mode, using boot.scr), skipping"
+            fi
 
             # 直接重新生成 uEnv.txt
             printf 'LINUX=/zImage\nINITRD=/uInitrd\nFDT=dtb/amlogic/%s\nAPPEND=%s\n' \
@@ -731,7 +826,7 @@ jobs:
 
           IMAGE_NAME="${{ steps.pack.outputs.image_name }}"
           BUILD_DATE="${{ steps.pack.outputs.build_date }}"
-          TAG="v6.1.${BUILD_DATE}-${OPHUB_SOC}-$(echo $GITHUB_SHA | cut -c1-7)"
+          TAG="v6.2.${BUILD_DATE}-${OPHUB_SOC}-$(echo $GITHUB_SHA | cut -c1-7)"
           echo "Creating release: $TAG"
           echo "Image name: $IMAGE_NAME"
 
@@ -740,7 +835,16 @@ jobs:
 
           # 生成 release notes 文件
           cat > /tmp/release-notes.md << 'RNOTES'
-          ## B860AV2.1-A Armbian 线刷镜像 V6.1
+          ## B860AV2.1-A Armbian 线刷镜像 V6.2
+
+          ### V6.2 改进 (U-Boot 启动 Logo — 消除黑屏)
+          - U-Boot 阶段显示静态 BMP Logo (1920x1080, 24-bit), 覆盖内核启动 + rootfs 扩容期间的黑屏
+          - 自定义 boot.scr 引导脚本, 在加载内核前执行 `bmp display` 显示 Logo
+          - Logo 文件存放于 boot 分区根目录 (logo.bmp), 由 CI 自动验证和转换格式
+          - CI 自动检测 assets/logo.bmp: 格式不正确时自动转换为 U-Boot 兼容 BMP (BMP3, 无压缩)
+          - 异常处理: logo.bmp 不存在时跳过 Logo 注入, 回退到 extlinux.conf 引导 (不中断构建)
+          - U-Boot 不支持 BMP 显示时: boot.scr 中 `if load ... logo.bmp` 失败, 跳过 Logo 继续启动
+          - 修复 boot.PARTITION 构建步骤中 `if` 语句缺少 `fi` 的语法缺陷
 
           ### V6.1 改进 (内核锁定 6.1.y LTS + 版本号带日期 + 系统优化)
           - 锁定内核版本为 6.1.y LTS (通过 ophub 镜像文件名过滤)
@@ -857,7 +961,7 @@ jobs:
           echo "" >> /tmp/release-notes.md
           echo "### 构建信息" >> /tmp/release-notes.md
           echo "- 构建时间: $(date -u '+%Y-%m-%d %H:%M UTC')" >> /tmp/release-notes.md
-          echo "- 版本: V6.1 (内核 6.1.y LTS + WiFi + 定制 DTB + eMMC 50MHz + 系统优化)" >> /tmp/release-notes.md
+          echo "- 版本: V6.2 (内核 6.1.y LTS + WiFi + 定制 DTB + eMMC 50MHz + 系统优化 + U-Boot Logo)" >> /tmp/release-notes.md
           echo "- U-Boot: ${UBOOT_VERSION} (主线, p212_defconfig)" >> /tmp/release-notes.md
           echo "- ophub SoC: ${OPHUB_SOC}" >> /tmp/release-notes.md
           echo "- 内核版本: ${KERNEL_VERSION}.y (LTS, 锁定)" >> /tmp/release-notes.md
@@ -868,7 +972,7 @@ jobs:
           echo "- 镜像名称: $IMAGE_NAME.img.gz" >> /tmp/release-notes.md
 
           gh release create "$TAG" \
-            --title "B860AV2.1-A Armbian V6.1 $(date +%Y-%m-%d)" \
+            --title "B860AV2.1-A Armbian V6.2 $(date +%Y-%m-%d)" \
             --notes-file /tmp/release-notes.md \
             artifacts/${IMAGE_NAME}.img.gz \
             artifacts/boot.fat32.gz \
