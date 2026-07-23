@@ -1,0 +1,16 @@
+[Unit]
+Description=First Boot Check and Auto-Repair
+After=network-online.target fix-gxl-eth.service
+Wants=network-online.target
+ConditionPathExists=/usr/local/bin/first-boot-check.sh
+
+[Service]
+Type=oneshot
+ExecStartPre=/bin/sleep 10
+ExecStart=/usr/local/bin/first-boot-check.sh
+RemainAfterExit=yes
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target
