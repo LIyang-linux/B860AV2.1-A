@@ -1,4 +1,4 @@
-# B860AV2.1-A Armbian 线刷镜像 - 全自动构建工作流
+# B860AV2.1-A Armbian 线刷镜像 - 全自动构建工作流 (V3)
 #
 # 功能：
 #   1. 编译主线 U-Boot v2025.04 (p212_defconfig, GXL)
@@ -6,10 +6,11 @@
 #   3. 用 gxlimg 重新打包 FIP (原厂 BL + 主线 U-Boot)
 #   4. 下载 ophub S905L3-B Armbian 镜像
 #   5. 提取 boot 分区 (内核 + DTB + initramfs + 引导脚本)
-#   6. 创建 64MB FAT32 boot.PARTITION
+#   6. 创建 64MB FAT32 boot.PARTITION (V3: e900v22e DTB)
 #   7. 提取并缩小 rootfs ext4 为 system.PARTITION
-#   8. 打包完整 Amlogic 线刷镜像 (bootloader + boot + rootfs)
-#   9. 上传 Artifact 和 Release
+#   8. V3: 注入网络可靠性脚本 (LPA修复/链路监控/MAC地址/sysctl优化)
+#   9. 打包完整 Amlogic 线刷镜像 (bootloader + boot + rootfs)
+#   10. 上传 Artifact 和 Release
 #
 # 使用方法：
 #   方式 1 (手动触发): Actions → Build Armbian Burn Image → Run workflow
@@ -56,6 +57,7 @@ on:
       - '.github/workflows/build-armbian-burn.yml'
       - 'scripts/build-armbian.sh'
       - 'armbian-v2/image.cfg'
+      - 'rootfs-overlay/**'
 
 env:
   UBOOT_VERSION: ${{ github.event.inputs.uboot_version || 'v2025.04' }}
@@ -266,9 +268,29 @@ jobs:
           mcopy -i boot.PARTITION ${DIR}/zImage ::zImage
           # initramfs
           mcopy -i boot.PARTITION ${DIR}/uInitrd ::uInitrd
-          # 引导配置
-          mcopy -i boot.PARTITION ${DIR}/uEnv.txt ::uEnv.txt
-          mcopy -i boot.PARTITION ${DIR}/boot.ini ::boot.ini
+          # 从 ophub uEnv.txt 提取 root=UUID= 参数
+          ROOT_UUID=$(grep -oP 'root=UUID=\K[a-f0-9-]+' ${DIR}/uEnv.txt || echo "")
+          if [ -z "$ROOT_UUID" ]; then
+            echo "WARNING: No UUID in uEnv.txt, using fallback"
+            ROOT_UUID="9e65a41f-0451-48db-90da-5f7f330f7fe8"
+          fi
+          echo "Root UUID: $ROOT_UUID"
+
+          # V3: 默认 DTB 改为 e900v22e (修复 HDMI 控制器 0d0d:0d:0d 问题)
+          DEFAULT_DTB="meson-gxl-s905l3b-e900v22e.dtb"
+
+          # 生成自定义 uEnv.txt (确保 DTB 一致性)
+          printf 'LINUX=/zImage\nINITRD=/uInitrd\nFDT=dtb/amlogic/%s\nAPPEND=root=UUID=%s rootflags=data=writeback rw rootwait rootfstype=ext4 console=ttyAML0,115200n8 console=tty0 no_console_suspend consoleblank=0 fsck.fix=yes fsck.repair=yes net.ifnames=0 max_loop=128 loglevel=1\n' "${DEFAULT_DTB}" "${ROOT_UUID}" > /tmp/uEnv.txt
+          mcopy -i boot.PARTITION /tmp/uEnv.txt ::uEnv.txt
+
+          # 修改 boot.ini: 强制使用 e900v22e DTB
+          if [ -f "${DIR}/boot.ini" ]; then
+            cp ${DIR}/boot.ini /tmp/boot.ini
+            sed -i 's|setenv dtb_name.*|setenv dtb_name meson-gxl-s905l3b-e900v22e.dtb|g' /tmp/boot.ini
+            sed -i 's|setenv fdtfile.*|setenv fdtfile meson-gxl-s905l3b-e900v22e.dtb|g' /tmp/boot.ini
+            mcopy -i boot.PARTITION /tmp/boot.ini ::boot.ini
+          fi
+
           # 引导脚本 (如果存在)
           for f in boot.scr boot.cmd emmc_autoscript emmc_autoscript.cmd \
                    s905_autoscript s905_autoscript.cmd \
@@ -279,7 +301,7 @@ jobs:
           # DTB 目录
           mmd -i boot.PARTITION ::dtb
           mmd -i boot.PARTITION ::dtb/amlogic
-          # 复制所有 GXL S905L DTB
+          # 复制所有 GXL S905L DTB (多 DTB 备用)
           for dtb in ${DIR}/dtb/amlogic/meson-gxl-s905l3b-*.dtb \
                      ${DIR}/dtb/amlogic/meson-gxl-s905l2-*.dtb \
                      ${DIR}/dtb/amlogic/meson-gxl-s905x-p212.dtb; do
@@ -289,19 +311,8 @@ jobs:
           # extlinux 目录 (用于主线 U-Boot distro boot)
           mmd -i boot.PARTITION ::extlinux
 
-          # 从 uEnv.txt 提取 root=UUID= 参数
-          ROOT_UUID=$(grep -oP 'root=UUID=\K[a-f0-9-]+' ${DIR}/uEnv.txt || echo "")
-          if [ -z "$ROOT_UUID" ]; then
-            echo "WARNING: No UUID in uEnv.txt, using fallback"
-            ROOT_UUID="9e65a41f-0451-48db-90da-5f7f330f7fe8"
-          fi
-          echo "Root UUID: $ROOT_UUID"
-
-          # 默认 DTB
-          DEFAULT_DTB="meson-gxl-s905l3b-m302a.dtb"
-
-          # 用 printf 生成 extlinux.conf (避免 heredoc 在 YAML 中的解析问题)
-          printf 'label Armbian\n    kernel /zImage\n    initrd /uInitrd\n    fdt /dtb/amlogic/%s\n    append root=UUID=%s rootflags=data=writeback rw rootwait rootfstype=ext4 console=ttyAML0,115200n8 console=tty0 no_console_suspend consoleblank=0 fsck.fix=yes fsck.repair=yes net.ifnames=0 max_loop=128 loglevel=1\n' "${DEFAULT_DTB}" "${ROOT_UUID}" > /tmp/extlinux.conf
+          # 生成 extlinux.conf (V3: 添加 timeout + default + 额外稳定性参数)
+          printf 'default Armbian\ntimeout 3\n\nlabel Armbian\n    kernel /zImage\n    initrd /uInitrd\n    fdt /dtb/amlogic/%s\n    append root=UUID=%s rootflags=data=writeback rw rootwait rootfstype=ext4 console=ttyAML0,115200n8 console=tty0 no_console_suspend consoleblank=0 fsck.fix=yes fsck.repair=yes net.ifnames=0 max_loop=128 loglevel=1\n' "${DEFAULT_DTB}" "${ROOT_UUID}" > /tmp/extlinux.conf
           mcopy -i boot.PARTITION /tmp/extlinux.conf ::extlinux/extlinux.conf
 
           echo "=== boot.PARTITION contents ==="
@@ -341,6 +352,83 @@ jobs:
           echo "=== system.PARTITION ==="
           ls -lh system.PARTITION
           dumpe2fs -h system.PARTITION 2>/dev/null | grep -E "UUID|Block count|Free blocks"
+
+      # ========== V3: 注入网络可靠性脚本 ==========
+      - name: Inject network reliability scripts into rootfs
+        run: |
+          set -e
+          echo "=== Injecting network reliability scripts ==="
+
+          # 扩展 rootfs 增加 50MB 空间用于注入
+          e2fsck -fy system.PARTITION 2>&1 | tail -3
+          CURRENT_BLOCKS=$(dumpe2fs -h system.PARTITION 2>/dev/null | grep 'Block count' | awk '{print $3}')
+          BLKSIZE=$(dumpe2fs -h system.PARTITION 2>/dev/null | grep 'Block size' | awk '{print $3}')
+          CURRENT_MB=$(( CURRENT_BLOCKS * BLKSIZE / 1024 / 1024 ))
+          TARGET_MB=$(( CURRENT_MB + 50 ))
+          echo "Expanding rootfs: ${CURRENT_MB}MB -> ${TARGET_MB}MB"
+          truncate -s ${TARGET_MB}M system.PARTITION
+          resize2fs system.PARTITION 2>&1 | tail -3
+
+          # 挂载 rootfs
+          sudo mkdir -p /mnt/rootfs
+          sudo mount -o loop system.PARTITION /mnt/rootfs
+
+          # 复制 rootfs-overlay 文件
+          if [ -d rootfs-overlay ]; then
+            echo "Copying rootfs-overlay files..."
+            sudo cp -a rootfs-overlay/* /mnt/rootfs/
+          fi
+
+          # 设置脚本权限
+          sudo chmod 755 /mnt/rootfs/usr/local/bin/fix-gxl-eth.sh 2>/dev/null || true
+          sudo chmod 755 /mnt/rootfs/usr/local/bin/eth-monitor.sh 2>/dev/null || true
+          sudo chmod 755 /mnt/rootfs/usr/local/bin/mac-setup.sh 2>/dev/null || true
+
+          # 启用 systemd 服务 (创建符号链接)
+          sudo mkdir -p /mnt/rootfs/etc/systemd/system/multi-user.target.wants
+          sudo ln -sf /etc/systemd/system/fix-gxl-eth.service \
+            /mnt/rootfs/etc/systemd/system/multi-user.target.wants/fix-gxl-eth.service
+          sudo ln -sf /etc/systemd/system/eth-monitor.service \
+            /mnt/rootfs/etc/systemd/system/multi-user.target.wants/eth-monitor.service
+          sudo ln -sf /etc/systemd/system/mac-setup.service \
+            /mnt/rootfs/etc/systemd/system/multi-user.target.wants/mac-setup.service
+
+          # 优化 fstab: 添加 noatime, commit=600, errors=remount-ro
+          if [ -f /mnt/rootfs/etc/fstab ]; then
+            echo "=== Original fstab ==="
+            cat /mnt/rootfs/etc/fstab
+            # 在根分区挂载选项中添加优化参数
+            sudo sed -i 's|errors=remount-ro|errors=remount-ro,noatime,nodiratime,commit=600|g' /mnt/rootfs/etc/fstab
+            # 如果没有 errors=remount-ro, 在 defaults 后添加
+            sudo sed -i 's|\(/ .*defaults\)\(|\1,noatime,commit=600(|g' /mnt/rootfs/etc/fstab
+            echo "=== Optimized fstab ==="
+            cat /mnt/rootfs/etc/fstab
+          fi
+
+          # 设置 NetworkManager 配置文件权限
+          sudo chmod 644 /mnt/rootfs/etc/NetworkManager/conf.d/10-eth-managed.conf 2>/dev/null || true
+
+          # 验证注入的文件
+          echo "=== Injected files ==="
+          ls -la /mnt/rootfs/usr/local/bin/fix-gxl-eth.sh 2>/dev/null || echo "MISSING: fix-gxl-eth.sh"
+          ls -la /mnt/rootfs/usr/local/bin/eth-monitor.sh 2>/dev/null || echo "MISSING: eth-monitor.sh"
+          ls -la /mnt/rootfs/usr/local/bin/mac-setup.sh 2>/dev/null || echo "MISSING: mac-setup.sh"
+          ls -la /mnt/rootfs/etc/systemd/system/fix-gxl-eth.service 2>/dev/null || echo "MISSING: fix-gxl-eth.service"
+          ls -la /mnt/rootfs/etc/systemd/system/multi-user.target.wants/ 2>/dev/null
+
+          # 同步并卸载
+          sudo sync
+          sudo umount /mnt/rootfs
+
+          # 重新缩小 rootfs
+          e2fsck -fy system.PARTITION 2>&1 | tail -3
+          resize2fs -M system.PARTITION 2>&1
+          BLOCKS=$(dumpe2fs -h system.PARTITION 2>/dev/null | grep 'Block count' | awk '{print $3}')
+          BLKSIZE=$(dumpe2fs -h system.PARTITION 2>/dev/null | grep 'Block size' | awk '{print $3}')
+          FILE_SIZE=$((BLOCKS * BLKSIZE))
+          truncate -s $FILE_SIZE system.PARTITION
+          echo "=== Final system.PARTITION (with network scripts) ==="
+          ls -lh system.PARTITION
 
       # ========== 打包完整线刷镜像 ==========
       - name: Pack complete Amlogic burn image
@@ -405,15 +493,25 @@ jobs:
       - name: Create GitHub Release
         if: github.event.inputs.create_release != 'false'
         run: |
-          TAG="v2.$(date +%Y%m%d)-${OPHUB_SOC}-$(echo $GITHUB_SHA | cut -c1-7)"
+          TAG="v3.$(date +%Y%m%d)-${OPHUB_SOC}-$(echo $GITHUB_SHA | cut -c1-7)"
           echo "Creating release: $TAG"
 
           # 获取 rootfs UUID
           ROOT_UUID=$(dumpe2fs -h system.PARTITION 2>/dev/null | grep -oP 'UUID:\s+\K[a-f0-9-]+')
 
-          # 生成 release notes 文件 (避免 shell 转义问题)
+          # 生成 release notes 文件
           cat > /tmp/release-notes.md << 'RNOTES'
-          ## B860AV2.1-A Armbian 线刷镜像
+          ## B860AV2.1-A Armbian 线刷镜像 V3
+
+          ### V3 改进 (提升首次启动成功率)
+          - DTB 切换为 e900v22e (修复 HDMI 控制器 0d0d:0d:0d 问题)
+          - 注入 GXL PHY LPA Corruption 修复脚本 (fix-gxl-eth.service)
+          - 注入以太网链路持续监控 (eth-monitor.service)
+          - 注入 MAC 地址设置脚本 (mac-setup.service)
+          - 网络性能优化 sysctl 配置
+          - fstab 优化: noatime + commit=600 减少 eMMC 写入
+          - extlinux.conf 添加 timeout 和 default 指令
+          - uEnv.txt 和 boot.ini 统一使用 e900v22e DTB
 
           ### 文件说明
           | 文件 | 说明 |
@@ -428,18 +526,25 @@ jobs:
           2. gunzip 解压
           3. Amlogic USB Burning Tool v2.1.6 导入烧录
           4. 连接 OTG 口线刷
+
+          ### 网络可靠性
+          首次启动时, fix-gxl-eth.service 会自动检测并修复 GXL PHY LPA corruption.
+          eth-monitor.service 持续监控链路状态, 断线时自动重试.
+          无需手动干预, 以太网应自动可用.
           RNOTES
 
           echo "" >> /tmp/release-notes.md
           echo "### 构建信息" >> /tmp/release-notes.md
           echo "- 构建时间: $(date -u '+%Y-%m-%d %H:%M UTC')" >> /tmp/release-notes.md
+          echo "- 版本: V3 (e900v22e DTB + 网络可靠性脚本)" >> /tmp/release-notes.md
           echo "- U-Boot: ${UBOOT_VERSION} (主线, p212_defconfig)" >> /tmp/release-notes.md
           echo "- ophub SoC: ${OPHUB_SOC}" >> /tmp/release-notes.md
+          echo "- 默认 DTB: meson-gxl-s905l3b-e900v22e.dtb" >> /tmp/release-notes.md
           echo "- Root UUID: ${ROOT_UUID}" >> /tmp/release-notes.md
           echo "- Git SHA: ${GITHUB_SHA::7}" >> /tmp/release-notes.md
 
           gh release create "$TAG" \
-            --title "B860AV2.1-A Armbian $(date +%Y-%m-%d)" \
+            --title "B860AV2.1-A Armbian V3 $(date +%Y-%m-%d)" \
             --notes-file /tmp/release-notes.md \
             artifacts/b860av21-armbian-burn.img.gz \
             artifacts/boot.fat32.gz \

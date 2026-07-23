@@ -1,0 +1,13 @@
+[Unit]
+Description=MAC Address Setup from U-Boot Env
+After=sys-subsystem-net-devices-eth0.device
+Before=fix-gxl-eth.service network.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/mac-setup.sh
+TimeoutStartSec=30
+
+[Install]
+WantedBy=multi-user.target

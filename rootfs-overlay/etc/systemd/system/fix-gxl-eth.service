@@ -1,0 +1,19 @@
+[Unit]
+Description=Fix Amlogic GXL Internal PHY LPA Corruption
+Documentation=https://github.com/LIyang-linux/B860AV2.1-A
+After=sys-subsystem-net-devices-eth0.device
+Before=network.target network-manager.service
+Wants=network-pre.target
+After=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStartPre=/bin/sleep 3
+ExecStart=/usr/local/bin/fix-gxl-eth.sh
+TimeoutStartSec=60
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target
