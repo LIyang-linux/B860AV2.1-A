@@ -356,40 +356,34 @@ jobs:
       # ========== V3: 注入网络可靠性脚本 ==========
       - name: Inject network reliability scripts into rootfs
         run: |
-          set -e
+          # 禁用 set -e: GitHub Actions 默认 bash -e -o pipefail, 部分非关键命令可能返回非零
+          set +e
           echo "=== Injecting network reliability scripts ==="
 
-          # V3 关键修复: 用实际 rootfs UUID 更新 boot.PARTITION
-          # ophub uEnv.txt 中的 UUID 可能与实际 ext4 UUID 不匹配
-          ACTUAL_UUID=$(dumpe2fs -h system.PARTITION 2>/dev/null | grep -oP 'UUID:\s+\K[a-f0-9-]+')
+          # V3 关键修复: 用实际 rootfs UUID 重新生成 boot 配置文件
+          # ophub uEnv.txt 中的 UUID 与实际 ext4 UUID 不匹配, 这是导致启动失败的主要原因之一
+          ACTUAL_UUID=$(dumpe2fs -h system.PARTITION 2>/dev/null | grep -oP 'UUID:\s+\K[a-f0-9-]+' || echo "")
           echo "Actual rootfs UUID: $ACTUAL_UUID"
+
           if [ -n "$ACTUAL_UUID" ]; then
-            echo "Updating boot.PARTITION with correct UUID..."
-            # extlinux.conf
-            rm -f /tmp/extlinux.conf
-            mcopy -i boot.PARTITION ::extlinux/extlinux.conf /tmp/extlinux.conf 2>/dev/null || true
-            if [ -s /tmp/extlinux.conf ]; then
-              sed -i "s|root=UUID=[a-f0-9-]*|root=UUID=$ACTUAL_UUID|g" /tmp/extlinux.conf
-              mcopy -i boot.PARTITION /tmp/extlinux.conf ::extlinux/extlinux.conf
-              echo "  Updated extlinux.conf"
-            fi
-            # uEnv.txt
-            rm -f /tmp/uEnv.txt
-            mcopy -i boot.PARTITION ::uEnv.txt /tmp/uEnv.txt 2>/dev/null || true
-            if [ -s /tmp/uEnv.txt ]; then
-              sed -i "s|root=UUID=[a-f0-9-]*|root=UUID=$ACTUAL_UUID|g" /tmp/uEnv.txt
-              mcopy -i boot.PARTITION /tmp/uEnv.txt ::uEnv.txt
-              echo "  Updated uEnv.txt"
-            fi
-            # boot.ini (仅当包含 UUID 时)
-            rm -f /tmp/boot.ini
-            mcopy -i boot.PARTITION ::boot.ini /tmp/boot.ini 2>/dev/null || true
-            if [ -s /tmp/boot.ini ] && grep -q "root=UUID=" /tmp/boot.ini; then
-              sed -i "s|root=UUID=[a-f0-9-]*|root=UUID=$ACTUAL_UUID|g" /tmp/boot.ini
-              mcopy -i boot.PARTITION /tmp/boot.ini ::boot.ini
-              echo "  Updated boot.ini"
-            fi
-            echo "UUID updated in boot.PARTITION"
+            DEFAULT_DTB="meson-gxl-s905l3b-e900v22e.dtb"
+            BOOT_ARGS="root=UUID=${ACTUAL_UUID} rootflags=data=writeback rw rootwait rootfstype=ext4 console=ttyAML0,115200n8 console=tty0 no_console_suspend consoleblank=0 fsck.fix=yes fsck.repair=yes net.ifnames=0 max_loop=128 loglevel=1"
+
+            # 直接重新生成 extlinux.conf (不提取再修改, 避免任何中间失败)
+            printf 'default Armbian\ntimeout 3\n\nlabel Armbian\n    kernel /zImage\n    initrd /uInitrd\n    fdt /dtb/amlogic/%s\n    append %s\n' \
+              "$DEFAULT_DTB" "$BOOT_ARGS" > /tmp/extlinux.conf
+            mcopy -i boot.PARTITION /tmp/extlinux.conf ::extlinux/extlinux.conf
+            echo "  extlinux.conf regenerated with UUID $ACTUAL_UUID"
+
+            # 直接重新生成 uEnv.txt
+            printf 'LINUX=/zImage\nINITRD=/uInitrd\nFDT=dtb/amlogic/%s\nAPPEND=%s\n' \
+              "$DEFAULT_DTB" "$BOOT_ARGS" > /tmp/uEnv.txt
+            mcopy -i boot.PARTITION /tmp/uEnv.txt ::uEnv.txt
+            echo "  uEnv.txt regenerated with UUID $ACTUAL_UUID"
+
+            echo "UUID fix complete in boot.PARTITION"
+          else
+            echo "WARNING: Could not determine actual UUID, skipping UUID fix"
           fi
 
           # 扩展 rootfs 增加 50MB 空间用于注入
@@ -402,20 +396,27 @@ jobs:
           truncate -s ${TARGET_MB}M system.PARTITION
           resize2fs system.PARTITION 2>&1 | tail -3
 
-          # 挂载 rootfs
+          # 挂载 rootfs (关键操作: 失败则退出)
           sudo mkdir -p /mnt/rootfs
-          sudo mount -o loop system.PARTITION /mnt/rootfs
+          if ! sudo mount -o loop system.PARTITION /mnt/rootfs; then
+            echo "ERROR: Failed to mount system.PARTITION"
+            exit 1
+          fi
+          echo "Rootfs mounted successfully"
 
           # 复制 rootfs-overlay 文件
           if [ -d rootfs-overlay ]; then
             echo "Copying rootfs-overlay files..."
             sudo cp -a rootfs-overlay/* /mnt/rootfs/
+            echo "Overlay files copied"
+          else
+            echo "WARNING: rootfs-overlay directory not found"
           fi
 
           # 设置脚本权限
-          sudo chmod 755 /mnt/rootfs/usr/local/bin/fix-gxl-eth.sh 2>/dev/null || true
-          sudo chmod 755 /mnt/rootfs/usr/local/bin/eth-monitor.sh 2>/dev/null || true
-          sudo chmod 755 /mnt/rootfs/usr/local/bin/mac-setup.sh 2>/dev/null || true
+          sudo chmod 755 /mnt/rootfs/usr/local/bin/fix-gxl-eth.sh 2>/dev/null
+          sudo chmod 755 /mnt/rootfs/usr/local/bin/eth-monitor.sh 2>/dev/null
+          sudo chmod 755 /mnt/rootfs/usr/local/bin/mac-setup.sh 2>/dev/null
 
           # 启用 systemd 服务 (创建符号链接)
           sudo mkdir -p /mnt/rootfs/etc/systemd/system/multi-user.target.wants
@@ -425,36 +426,40 @@ jobs:
             /mnt/rootfs/etc/systemd/system/multi-user.target.wants/eth-monitor.service
           sudo ln -sf /etc/systemd/system/mac-setup.service \
             /mnt/rootfs/etc/systemd/system/multi-user.target.wants/mac-setup.service
+          echo "Systemd services enabled"
 
-          # 优化 fstab: 添加 noatime, commit=600 (ophub 可能已优化)
+          # 优化 fstab (ophub 通常已优化, 仅在未优化时处理)
           if [ -f /mnt/rootfs/etc/fstab ]; then
-            echo "=== Original fstab ==="
+            echo "=== fstab ==="
             cat /mnt/rootfs/etc/fstab
-            # 仅在未包含 commit=600 时添加优化参数
-            if ! grep -q "commit=600" /mnt/rootfs/etc/fstab; then
-              sudo sed -i 's|errors=remount-ro|errors=remount-ro,noatime,nodiratime,commit=600|g' /mnt/rootfs/etc/fstab || true
-              sudo sed -i 's|\(/ .*defaults\)|\1,noatime,commit=600|g' /mnt/rootfs/etc/fstab || true
-              echo "=== Optimized fstab ==="
-              cat /mnt/rootfs/etc/fstab
+            if ! grep -q "commit=600" /mnt/rootfs/etc/fstab 2>/dev/null; then
+              sudo sed -i 's|errors=remount-ro|errors=remount-ro,noatime,nodiratime,commit=600|g' /mnt/rootfs/etc/fstab 2>/dev/null
+              echo "fstab optimized"
             else
-              echo "fstab already optimized, skipping"
+              echo "fstab already optimized"
             fi
           fi
 
-          # 设置 NetworkManager 配置文件权限
-          sudo chmod 644 /mnt/rootfs/etc/NetworkManager/conf.d/10-eth-managed.conf 2>/dev/null || true
+          # 设置配置文件权限
+          sudo chmod 644 /mnt/rootfs/etc/NetworkManager/conf.d/10-eth-managed.conf 2>/dev/null
+          sudo chmod 644 /mnt/rootfs/etc/sysctl.d/99-gxl-network.conf 2>/dev/null
+          sudo chmod 644 /mnt/rootfs/etc/systemd/system/*.service 2>/dev/null
 
           # 验证注入的文件
-          echo "=== Injected files ==="
+          echo "=== Injected files verification ==="
           ls -la /mnt/rootfs/usr/local/bin/fix-gxl-eth.sh 2>/dev/null || echo "MISSING: fix-gxl-eth.sh"
           ls -la /mnt/rootfs/usr/local/bin/eth-monitor.sh 2>/dev/null || echo "MISSING: eth-monitor.sh"
           ls -la /mnt/rootfs/usr/local/bin/mac-setup.sh 2>/dev/null || echo "MISSING: mac-setup.sh"
           ls -la /mnt/rootfs/etc/systemd/system/fix-gxl-eth.service 2>/dev/null || echo "MISSING: fix-gxl-eth.service"
           ls -la /mnt/rootfs/etc/systemd/system/multi-user.target.wants/ 2>/dev/null
 
-          # 同步并卸载
+          # 同步并卸载 (关键操作: 失败则退出)
           sudo sync
-          sudo umount /mnt/rootfs
+          if ! sudo umount /mnt/rootfs; then
+            echo "ERROR: Failed to unmount rootfs, retrying..."
+            sudo umount -l /mnt/rootfs 2>/dev/null
+          fi
+          echo "Rootfs unmounted"
 
           # 重新缩小 rootfs
           e2fsck -fy system.PARTITION 2>&1 | tail -3
@@ -465,6 +470,7 @@ jobs:
           truncate -s $FILE_SIZE system.PARTITION
           echo "=== Final system.PARTITION (with network scripts) ==="
           ls -lh system.PARTITION
+          echo "=== Inject step complete ==="
 
       # ========== 打包完整线刷镜像 ==========
       - name: Pack complete Amlogic burn image
