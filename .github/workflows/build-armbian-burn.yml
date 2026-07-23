@@ -298,13 +298,8 @@ jobs:
           # 默认 DTB
           DEFAULT_DTB="meson-gxl-s905l3b-m302a.dtb"
 
-          cat > /tmp/extlinux.conf << EOF
-label Armbian
-    kernel /zImage
-    initrd /uInitrd
-    fdt /dtb/amlogic/${DEFAULT_DTB}
-    append root=UUID=${ROOT_UUID} rootflags=data=writeback rw rootwait rootfstype=ext4 console=ttyAML0,115200n8 console=tty0 no_console_suspend consoleblank=0 fsck.fix=yes fsck.repair=yes net.ifnames=0 max_loop=128 loglevel=1
-EOF
+          # 用 printf 生成 extlinux.conf (避免 heredoc 在 YAML 中的解析问题)
+          printf 'label Armbian\n    kernel /zImage\n    initrd /uInitrd\n    fdt /dtb/amlogic/%s\n    append root=UUID=%s rootflags=data=writeback rw rootwait rootfstype=ext4 console=ttyAML0,115200n8 console=tty0 no_console_suspend consoleblank=0 fsck.fix=yes fsck.repair=yes net.ifnames=0 max_loop=128 loglevel=1\n' "${DEFAULT_DTB}" "${ROOT_UUID}" > /tmp/extlinux.conf
           mcopy -i boot.PARTITION /tmp/extlinux.conf ::extlinux/extlinux.conf
 
           echo "=== boot.PARTITION contents ==="
@@ -359,44 +354,11 @@ EOF
           cp system.PARTITION burn-image/
 
           # 线刷配置文件
-          cat > burn-image/aml_sdc_burn.ini << 'EOF'
-;
-;Amlogic sdcard burning configure script
-;
-[common]
-erase_bootloader    = 1
-erase_flash         = 1
-reboot              = 0
+          printf ';\n;Amlogic sdcard burning configure script\n;\n[common]\nerase_bootloader    = 1\nerase_flash         = 1\nreboot              = 0\n\n[burn_ex]\npackage     = aml_upgrade_package.img\n' > burn-image/aml_sdc_burn.ini
 
-[burn_ex]
-package     = aml_upgrade_package.img
-;media       =
-EOF
+          printf 'Platform: gxl\nDDRLoad: 0xd9000000\nDDRRun: 0xd9000030\nUboot_down: 0x10000000\nUboot_decomp: 0x10000000\nUboot_enc_down: 0xd9000000\nUboot_enc_run: 0xd9000030\nUbootLoad: 0x10000000\nUbootRun: 0x10000000\n' > burn-image/platform.conf
 
-          cat > burn-image/platform.conf << 'EOF'
-Platform: gxl
-DDRLoad: 0xd9000000
-DDRRun: 0xd9000030
-Uboot_down: 0x10000000
-Uboot_decomp: 0x10000000
-Uboot_enc_down: 0xd9000000
-Uboot_enc_run: 0xd9000030
-UbootLoad: 0x10000000
-UbootRun: 0x10000000
-EOF
-
-          cat > burn-image/image.cfg << 'EOF'
-[LIST_NORMAL]
-file="DDR.USB"			main_type="USB"		sub_type="DDR"
-file="UBOOT.USB"		main_type="USB"		sub_type="UBOOT"
-file="aml_sdc_burn.ini"		main_type="ini"		sub_type="aml_sdc_burn"
-file="platform.conf"		main_type="conf"	sub_type="platform"
-
-[LIST_VERIFY]
-file="bootloader.PARTITION"	main_type="PARTITION"	sub_type="bootloader"
-file="boot.PARTITION"		main_type="PARTITION"	sub_type="boot"
-file="system.PARTITION"		main_type="PARTITION"	sub_type="data"
-EOF
+          printf '[LIST_NORMAL]\nfile="DDR.USB"\t\t\tmain_type="USB"\t\tsub_type="DDR"\nfile="UBOOT.USB"\t\t\tmain_type="USB"\t\tsub_type="UBOOT"\nfile="aml_sdc_burn.ini"\t\tmain_type="ini"\t\tsub_type="aml_sdc_burn"\nfile="platform.conf"\t\tmain_type="conf"\tsub_type="platform"\n\n[LIST_VERIFY]\nfile="bootloader.PARTITION"\tmain_type="PARTITION"\tsub_type="bootloader"\nfile="boot.PARTITION"\t\tmain_type="PARTITION"\tsub_type="boot"\nfile="system.PARTITION"\t\tmain_type="PARTITION"\tsub_type="data"\n' > burn-image/image.cfg
 
           echo "=== Packing burn image ==="
           qemu-i386 aml_image_v2_packer -r burn-image/image.cfg burn-image \
