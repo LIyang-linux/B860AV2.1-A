@@ -209,7 +209,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: u-boot-src
-          key: uboot-${{ env.UBOOT_VERSION }}-p212
+          key: uboot-${{ env.UBOOT_VERSION }}-p212-video-v2
 
       - name: Download and build U-Boot
         if: steps.cache-uboot.outputs.cache-hit != 'true'
@@ -224,8 +224,36 @@ jobs:
           export ARCH=arm
           export CROSS_COMPILE=aarch64-linux-gnu-
           make p212_defconfig
+
+          # V6.2: 启用视频和 BMP 显示支持 (p212_defconfig 默认不包含)
+          # CONFIG_VIDEO         - 视频子系统基础 (DM Video)
+          # CONFIG_VIDEO_MESON   - Amlogic Meson HDMI/VPU 驱动
+          # CONFIG_DISPLAY       - 显示面板 uclass
+          # CONFIG_CMD_BMP       - bmp display 命令
+          # CONFIG_VIDEO_BPP32   - 32位色深支持 (BMP 24bit 需要)
+          # CONFIG_VIDEO_BPP16   - 16位色深支持
+          # CONFIG_VIDEO_BPP8    - 8位色深支持
+          # CONFIG_SYS_WHITE_ON_BLACK - 黑底白字 (减少闪烁)
+          ./scripts/config --enable VIDEO
+          ./scripts/config --enable VIDEO_MESON
+          ./scripts/config --enable DISPLAY
+          ./scripts/config --enable CMD_BMP
+          ./scripts/config --enable VIDEO_BPP32
+          ./scripts/config --enable VIDEO_BPP16
+          ./scripts/config --enable VIDEO_BPP8
+          ./scripts/config --enable SYS_WHITE_ON_BLACK
+          make olddefconfig
+
+          # 验证关键配置已启用
+          echo "=== Video/BMP config verification ==="
+          grep -E "CONFIG_(VIDEO|CMD_BMP|DISPLAY)" .config || echo "WARNING: Video config not found!"
+
           make -j$(nproc)
           ls -lh u-boot.bin
+
+          # 验证 bmp 命令已编译
+          echo "=== Checking bmp command in U-Boot ==="
+          strings u-boot.bin | grep -i "bmp" | head -5 || echo "WARNING: bmp command not found in binary!"
 
       - name: Copy U-Boot binary and check env config
         run: |
@@ -487,6 +515,9 @@ jobs:
             mcopy -i boot.PARTITION assets/logo.bmp ::logo.bmp
             echo "  logo.bmp copied to boot partition"
             # 用 printf 生成 boot.cmd (避免 heredoc 在 YAML 中的缩进问题)
+            # V6.2 fix: 移除 osd/open/clear (主线 U-Boot 无此命令)
+            # V6.2 fix: 移除 outputmode/hdmimode (Amlogic 厂商 U-Boot 专有变量)
+            # 主线 U-Boot DM Video 会自动通过 HDMI EDID 初始化显示输出
             printf '%s\n' \
               'ODROIDN2-UBOOT-CONFIG' \
               'setenv env_addr 0x10400000' \
@@ -496,10 +527,6 @@ jobs:
               'setenv logo_addr 0x20000000' \
               'if test "${devtype}" = ""; then setenv devtype "mmc"; fi' \
               'if test "${devnum}" = ""; then setenv devnum 0; fi' \
-              'setenv outputmode 720p60hz' \
-              'setenv hdmimode 720p60hz' \
-              'osd open' \
-              'osd clear' \
               'if load ${devtype} ${devnum} ${logo_addr} logo.bmp; then' \
               '  bmp display ${logo_addr} 0 0' \
               '  echo "Boot logo displayed"' \
