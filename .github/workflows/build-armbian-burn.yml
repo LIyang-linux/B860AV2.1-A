@@ -1,4 +1,4 @@
-# B860AV2.1-A Armbian 线刷镜像 - 全自动构建工作流 (V6)
+# B860AV2.1-A Armbian 线刷镜像 - 全自动构建工作流 (V6.1)
 #
 # 功能：
 #   1. 编译主线 U-Boot v2025.04 (p212_defconfig, GXL)
@@ -10,8 +10,9 @@
 #   7. 提取并缩小 rootfs ext4 为 system.PARTITION
 #   8. V3-V5: 注入网络可靠性脚本 + UUID修复 + tune2fs优化 + 首启检查 + DTB定制
 #   9. V6: 内置 WiFi 固件 (SSV6051) + WiFi 自动检测脚本 + 连接助手
-#   10. 打包完整 Amlogic 线刷镜像 (bootloader + boot + rootfs)
-#   11. 上传 Artifact 和 Release
+#  10. V6.1: 锁定内核 6.1.y LTS + 版本号带日期标签
+#  11. 打包完整 Amlogic 线刷镜像 (bootloader + boot + rootfs)
+#  12. 上传 Artifact 和 Release
 #
 # 使用方法：
 #   方式 1 (手动触发): Actions → Build Armbian Burn Image → Run workflow
@@ -46,6 +47,11 @@ on:
         required: false
         default: ''
         type: string
+      kernel_version:
+        description: '锁定内核版本 (如 6.1, 6.6, 留空则用最新)'
+        required: false
+        default: '6.1'
+        type: string
       create_release:
         description: '完成后创建 Release'
         required: true
@@ -63,6 +69,8 @@ on:
 env:
   UBOOT_VERSION: ${{ github.event.inputs.uboot_version || 'v2025.04' }}
   OPHUB_SOC: ${{ github.event.inputs.ophub_soc || 's905l3b' }}
+  KERNEL_VERSION: ${{ github.event.inputs.kernel_version || '6.1' }}
+  BUILD_VERSION: 'v6.1'
 
 jobs:
   build:
@@ -213,27 +221,42 @@ jobs:
             echo "url=${{ github.event.inputs.ophub_image_url }}" >> $GITHUB_OUTPUT
             echo "Using user-specified URL"
           else
-            echo "Finding latest ophub ${OPHUB_SOC} image..."
-            # 通过 GitHub API 查找最新 release
-            URL=$(curl -s "https://api.github.com/repos/ophub/amlogic-s9xxx-armbian/releases?per_page=20" \
+            echo "Finding latest ophub ${OPHUB_SOC} image with kernel ${KERNEL_VERSION}..."
+            # 通过 GitHub API 查找 release, 按内核版本过滤
+            # ophub 镜像命名: Armbian_XX.XX.X_amlogic_s905l3b_bullseye_6.1.174_server.img.gz
+            URL=$(curl -s "https://api.github.com/repos/ophub/amlogic-s9xxx-armbian/releases?per_page=50" \
               | python3 -c "
           import json, sys
           soc = '${OPHUB_SOC}'
+          kernel = '${KERNEL_VERSION}'
           releases = json.load(sys.stdin)
           for rel in releases:
               for asset in rel.get('assets', []):
                   name = asset.get('name', '')
                   if soc in name and name.endswith('.img.gz') and 'server' in name:
+                      if kernel and kernel not in name:
+                          continue
                       print(asset['browser_download_url'])
                       sys.exit(0)
+          # 如果指定内核版本没找到, 回退到任意版本
+          if kernel:
+              for rel in releases:
+                  for asset in rel.get('assets', []):
+                      name = asset.get('name', '')
+                      if soc in name and name.endswith('.img.gz') and 'server' in name:
+                          print(asset['browser_download_url'])
+                          sys.exit(0)
           print('')
           ")
             if [ -z "$URL" ]; then
-              echo "ERROR: No ophub ${OPHUB_SOC} image found"
+              echo "ERROR: No ophub ${OPHUB_SOC} image found (kernel=${KERNEL_VERSION})"
               exit 1
             fi
             echo "url=$URL" >> $GITHUB_OUTPUT
             echo "Found: $URL"
+            # 提取内核版本号显示
+            FILENAME=$(basename "$URL")
+            echo "Image filename: $FILENAME"
           fi
 
       - name: Download ophub Armbian image
@@ -604,9 +627,17 @@ jobs:
 
       # ========== 打包完整线刷镜像 ==========
       - name: Pack complete Amlogic burn image
+        id: pack
         run: |
           set -e
           mkdir -p burn-image
+
+          # 构建日期和版本号
+          BUILD_DATE=$(date +%Y%m%d)
+          IMAGE_NAME="b860av21-armbian-burn-${BUILD_VERSION}.${BUILD_DATE}-${OPHUB_SOC}"
+          echo "image_name=$IMAGE_NAME" >> $GITHUB_OUTPUT
+          echo "build_date=$BUILD_DATE" >> $GITHUB_OUTPUT
+          echo "Building image: $IMAGE_NAME"
 
           # 烧录组件
           cp DDR.USB burn-image/
@@ -624,28 +655,28 @@ jobs:
 
           echo "=== Packing burn image ==="
           qemu-i386 aml_image_v2_packer -r burn-image/image.cfg burn-image \
-            b860av21-armbian-burn.img
+            ${IMAGE_NAME}.img
 
           echo "=== Final burn image ==="
-          ls -lh b860av21-armbian-burn.img
+          ls -lh ${IMAGE_NAME}.img
 
           # 压缩
           echo "=== Compressing ==="
-          gzip -c b860av21-armbian-burn.img > b860av21-armbian-burn.img.gz
+          gzip -c ${IMAGE_NAME}.img > ${IMAGE_NAME}.img.gz
           gzip -c boot.PARTITION > boot.fat32.gz
           gzip -c system.PARTITION > rootfs.ext4.gz
-          ls -lh b860av21-armbian-burn.img.gz boot.fat32.gz rootfs.ext4.gz
+          ls -lh ${IMAGE_NAME}.img.gz boot.fat32.gz rootfs.ext4.gz
 
       # ========== 上传 Artifact ==========
       - name: Prepare artifacts
         run: |
+          IMAGE_NAME="${{ steps.pack.outputs.image_name }}"
           mkdir -p artifacts
-          cp b860av21-armbian-burn.img.gz artifacts/
-          cp b860av21-armbian-burn.img artifacts/ 2>/dev/null || true
+          cp ${IMAGE_NAME}.img.gz artifacts/
+          cp ${IMAGE_NAME}.img artifacts/ 2>/dev/null || true
           cp boot.fat32.gz artifacts/
           cp rootfs.ext4.gz artifacts/
           cp bootloader.PARTITION artifacts/
-          cp b860av21-armbian-burn.img.gz artifacts/b860av21-armbian-burn.img.gz
 
           # 校验文件
           cd artifacts
@@ -656,7 +687,7 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: b860av21-armbian-burn-${{ env.OPHUB_SOC }}-${{ github.run_number }}
+          name: ${{ steps.pack.outputs.image_name }}
           path: artifacts/
           retention-days: 30
           compression-level: 0
@@ -668,17 +699,26 @@ jobs:
           # V4 修复: 恢复 /dev/null 权限 (上一步 sudo 操作可能破坏)
           sudo chmod 666 /dev/null || true
 
-          TAG="v6.$(date +%Y%m%d)-${OPHUB_SOC}-$(echo $GITHUB_SHA | cut -c1-7)"
+          IMAGE_NAME="${{ steps.pack.outputs.image_name }}"
+          BUILD_DATE="${{ steps.pack.outputs.build_date }}"
+          TAG="v6.1.${BUILD_DATE}-${OPHUB_SOC}-$(echo $GITHUB_SHA | cut -c1-7)"
           echo "Creating release: $TAG"
+          echo "Image name: $IMAGE_NAME"
 
           # 获取 rootfs UUID
           ROOT_UUID=$(sudo dumpe2fs -h system.PARTITION 2>&1 | grep -oP 'UUID:\s+\K[a-f0-9-]+' || echo "unknown")
 
           # 生成 release notes 文件
           cat > /tmp/release-notes.md << 'RNOTES'
-          ## B860AV2.1-A Armbian 线刷镜像 V6
+          ## B860AV2.1-A Armbian 线刷镜像 V6.1
 
-          ### V6 改进 (WiFi 内置适配)
+          ### V6.1 改进 (内核锁定 6.1.y LTS + 版本号带日期)
+          - 锁定内核版本为 6.1.y LTS (通过 ophub 镜像文件名过滤)
+          - Release 标签格式: v6.1.YYYYMMDD-SoC-SHA (如 v6.1.20260723-s905l3b-abc1234)
+          - 修复内核版本过滤逻辑: 精确匹配文件名中的 6.1.x 版本号
+          - 回退机制: 若指定内核版本镜像不存在, 自动回退到最新可用版本
+
+          ### V6 改进 (WiFi 内置适配 — 已包含)
           - 内置 SSV6051/SV6256P WiFi 固件 (硅谷数模, B860AV2.1 固件 ssv_dump_flash 服务对应)
           - 固件路径: /lib/firmware/ 和 /lib/firmware/ssv6051/ (兼容不同驱动版本)
           - UWE5622 固件已由 ophub 默认包含 (紫光展锐, unisoc_wpa_s 服务对应)
@@ -689,6 +729,8 @@ jobs:
           - NetworkManager WiFi 配置: 禁用 MAC 随机化 + 禁用省电模式 (提升稳定性)
           - 支持 30+ 种 WiFi 驱动自动探测 (主线 + 树外驱动)
           - NW (无 WiFi) 版本自动跳过, 不产生错误
+          - 锁定内核 6.1.y LTS (ophub 官方默认, S905L3-B 兼容性最佳, 社区 Issue 最多)
+          - 避免使用 6.12.y (HDMI 崩溃/网卡缺失) 和 6.18.y (GPU SError)
 
           ### WiFi 使用方法
           ```
@@ -748,13 +790,13 @@ jobs:
           ### 文件说明
           | 文件 | 说明 |
           |------|------|
-          | b860av21-armbian-burn.img.gz | 完整线刷镜像 (USB Burning Tool) |
+          | b860av21-armbian-burn-v6.1.YYYYMMDD-s905l3b.img.gz | 完整线刷镜像 (USB Burning Tool) |
           | boot.fat32.gz | boot 分区 (手动 dd 用) |
           | rootfs.ext4.gz | rootfs 分区 (手动 dd 用) |
           | bootloader.PARTITION | FIP bootloader (原厂BL + 主线U-Boot) |
 
           ### 使用方法 (重要!)
-          1. 下载 b860av21-armbian-burn.img.gz 并 gunzip 解压
+          1. 下载 b860av21-armbian-burn-v6.1.YYYYMMDD-s905l3b.img.gz 并 gunzip 解压
           2. 打开 Amlogic USB Burning Tool v2.1.6
           3. 导入解压后的 .img 文件
           4. **必须勾选以下选项**:
@@ -778,18 +820,20 @@ jobs:
           echo "" >> /tmp/release-notes.md
           echo "### 构建信息" >> /tmp/release-notes.md
           echo "- 构建时间: $(date -u '+%Y-%m-%d %H:%M UTC')" >> /tmp/release-notes.md
-          echo "- 版本: V6 (WiFi 内置适配 + 定制 DTB + eMMC 50MHz + 移除 HS200)" >> /tmp/release-notes.md
+          echo "- 版本: V6.1 (内核 6.1.y LTS 锁定 + WiFi 内置适配 + 定制 DTB + eMMC 50MHz)" >> /tmp/release-notes.md
           echo "- U-Boot: ${UBOOT_VERSION} (主线, p212_defconfig)" >> /tmp/release-notes.md
           echo "- ophub SoC: ${OPHUB_SOC}" >> /tmp/release-notes.md
+          echo "- 内核版本: ${KERNEL_VERSION}.y (LTS, 锁定)" >> /tmp/release-notes.md
           echo "- 默认 DTB: meson-gxl-s905l3b-b860av21.dtb (eMMC 50MHz)" >> /tmp/release-notes.md
           echo "- WiFi 固件: SSV6051 (内置) + UWE5622 (ophub内置) + MT7601U (ophub内置)" >> /tmp/release-notes.md
           echo "- Root UUID: ${ROOT_UUID}" >> /tmp/release-notes.md
           echo "- Git SHA: ${GITHUB_SHA::7}" >> /tmp/release-notes.md
+          echo "- 镜像名称: $IMAGE_NAME.img.gz" >> /tmp/release-notes.md
 
           gh release create "$TAG" \
-            --title "B860AV2.1-A Armbian V6 $(date +%Y-%m-%d)" \
+            --title "B860AV2.1-A Armbian V6.1 $(date +%Y-%m-%d)" \
             --notes-file /tmp/release-notes.md \
-            artifacts/b860av21-armbian-burn.img.gz \
+            artifacts/${IMAGE_NAME}.img.gz \
             artifacts/boot.fat32.gz \
             artifacts/rootfs.ext4.gz \
             artifacts/bootloader.PARTITION \
