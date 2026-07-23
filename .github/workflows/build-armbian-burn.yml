@@ -157,8 +157,21 @@ jobs:
 
       - name: Download aml_image_v2_packer
         run: |
-          wget -q -O aml_image_v2_packer \
+          # 多源重试下载 aml_image_v2_packer
+          URLS=(
             "https://github.com/jethome-ru/jethome-tools/raw/convert/tools/aml_image_v2_packer_new"
+            "https://raw.githubusercontent.com/jethome-ru/jethome-tools/convert/tools/aml_image_v2_packer_new"
+            "https://ghproxy.com/https://github.com/jethome-ru/jethome-tools/raw/convert/tools/aml_image_v2_packer_new"
+          )
+          for url in "${URLS[@]}"; do
+            echo "Trying: $url"
+            wget -q --timeout=30 -O aml_image_v2_packer "$url" && break
+            echo "  Failed (exit: $?)"
+          done
+          if [ ! -s aml_image_v2_packer ]; then
+            echo "ERROR: All download attempts failed for aml_image_v2_packer"
+            exit 1
+          fi
           chmod +x aml_image_v2_packer
           echo "$(pwd)" >> $GITHUB_PATH
 
