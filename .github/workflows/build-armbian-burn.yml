@@ -65,6 +65,8 @@ jobs:
   build:
     runs-on: ubuntu-22.04
     timeout-minutes: 60
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout
@@ -409,16 +411,9 @@ jobs:
           # 获取 rootfs UUID
           ROOT_UUID=$(dumpe2fs -h system.PARTITION 2>/dev/null | grep -oP 'UUID:\s+\K[a-f0-9-]+')
 
-          gh release create "$TAG" \
-            --title "B860AV2.1-A Armbian $(date +%Y-%m-%d)" \
-            --notes "## B860AV2.1-A Armbian 线刷镜像
-
-          ### 构建信息
-          - 构建时间: $(date -u '+%Y-%m-%d %H:%M UTC')
-          - U-Boot: ${UBOOT_VERSION} (主线, p212_defconfig)
-          - ophub SoC: ${OPHUB_SOC}
-          - Root UUID: \`${ROOT_UUID}\`
-          - Git SHA: ${GITHUB_SHA::7}
+          # 生成 release notes 文件 (避免 shell 转义问题)
+          cat > /tmp/release-notes.md << 'RNOTES'
+          ## B860AV2.1-A Armbian 线刷镜像
 
           ### 文件说明
           | 文件 | 说明 |
@@ -433,7 +428,19 @@ jobs:
           2. gunzip 解压
           3. Amlogic USB Burning Tool v2.1.6 导入烧录
           4. 连接 OTG 口线刷
-          " \
+          RNOTES
+
+          echo "" >> /tmp/release-notes.md
+          echo "### 构建信息" >> /tmp/release-notes.md
+          echo "- 构建时间: $(date -u '+%Y-%m-%d %H:%M UTC')" >> /tmp/release-notes.md
+          echo "- U-Boot: ${UBOOT_VERSION} (主线, p212_defconfig)" >> /tmp/release-notes.md
+          echo "- ophub SoC: ${OPHUB_SOC}" >> /tmp/release-notes.md
+          echo "- Root UUID: ${ROOT_UUID}" >> /tmp/release-notes.md
+          echo "- Git SHA: ${GITHUB_SHA::7}" >> /tmp/release-notes.md
+
+          gh release create "$TAG" \
+            --title "B860AV2.1-A Armbian $(date +%Y-%m-%d)" \
+            --notes-file /tmp/release-notes.md \
             artifacts/b860av21-armbian-burn.img.gz \
             artifacts/boot.fat32.gz \
             artifacts/rootfs.ext4.gz \
