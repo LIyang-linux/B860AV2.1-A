@@ -473,43 +473,42 @@ jobs:
             # 复制 logo.bmp 到 boot 分区根目录
             mcopy -i boot.PARTITION assets/logo.bmp ::logo.bmp
             echo "  logo.bmp copied to boot partition"
-            # 生成 boot.cmd (U-Boot 引导脚本, 含 BMP Logo 显示)
-            cat > /tmp/boot.cmd << 'BOOTCMD'
-          ODROIDN2-UBOOT-CONFIG
-          # Load addresses
-          setenv env_addr 0x10400000
-          setenv kernel_addr 0x11000000
-          setenv initrd_addr 0x15000000
-          setenv dtb_addr 0x1000000
-          setenv logo_addr 0x20000000
-          if test "${devtype}" = ""; then setenv devtype "mmc"; fi
-          if test "${devnum}" = ""; then setenv devnum 0; fi
-          # Set HDMI to 720p for logo display (logo is 1280x720)
-          setenv outputmode 720p60hz
-          setenv hdmimode 720p60hz
-          osd open
-          osd clear
-          # Display boot logo (covers black screen during kernel init + rootfs resize)
-          if load ${devtype} ${devnum} ${logo_addr} logo.bmp; then
-            bmp display ${logo_addr} 0 0
-            echo "Boot logo displayed"
-          else
-            echo "WARNING: logo.bmp not found, continuing without logo"
-          fi
-          # Load uEnv.txt
-          load ${devtype} ${devnum} ${env_addr} uEnv.txt && env import -t ${env_addr} ${filesize}
-          setenv bootargs ${APPEND}
-          # Load kernel, initrd, dtb
-          load ${devtype} ${devnum} ${kernel_addr} ${LINUX}
-          load ${devtype} ${devnum} ${initrd_addr} ${INITRD}
-          load ${devtype} ${devnum} ${dtb_addr} ${FDT}
-          fdt addr ${dtb_addr}
-          # Boot kernel
-          booti ${kernel_addr} ${initrd_addr} ${dtb_addr}
-          BOOTCMD
+            # 用 printf 生成 boot.cmd (避免 heredoc 在 YAML 中的缩进问题)
+            printf '%s\n' \
+              'ODROIDN2-UBOOT-CONFIG' \
+              'setenv env_addr 0x10400000' \
+              'setenv kernel_addr 0x11000000' \
+              'setenv initrd_addr 0x15000000' \
+              'setenv dtb_addr 0x1000000' \
+              'setenv logo_addr 0x20000000' \
+              'if test "${devtype}" = ""; then setenv devtype "mmc"; fi' \
+              'if test "${devnum}" = ""; then setenv devnum 0; fi' \
+              'setenv outputmode 720p60hz' \
+              'setenv hdmimode 720p60hz' \
+              'osd open' \
+              'osd clear' \
+              'if load ${devtype} ${devnum} ${logo_addr} logo.bmp; then' \
+              '  bmp display ${logo_addr} 0 0' \
+              '  echo "Boot logo displayed"' \
+              'else' \
+              '  echo "WARNING: logo.bmp not found, continuing without logo"' \
+              'fi' \
+              'load ${devtype} ${devnum} ${env_addr} uEnv.txt && env import -t ${env_addr} ${filesize}' \
+              'setenv bootargs ${APPEND}' \
+              'load ${devtype} ${devnum} ${kernel_addr} ${LINUX}' \
+              'load ${devtype} ${devnum} ${initrd_addr} ${INITRD}' \
+              'load ${devtype} ${devnum} ${dtb_addr} ${FDT}' \
+              'fdt addr ${dtb_addr}' \
+              'booti ${kernel_addr} ${initrd_addr} ${dtb_addr}' \
+              > /tmp/boot.cmd
+            echo "  boot.cmd generated ($(wc -c < /tmp/boot.cmd) bytes)"
             # 编译 boot.scr (mkimage)
             mkimage -C none -A arm -T script -d /tmp/boot.cmd /tmp/boot.scr
+            echo "  mkimage completed (exit: $?)"
+            # 先删除旧 boot.scr 再复制 (避免覆盖问题)
+            mdel -i boot.PARTITION ::boot.scr 2>/dev/null || true
             mcopy -i boot.PARTITION /tmp/boot.scr ::boot.scr
+            echo "  boot.scr copied to boot partition (exit: $?)"
             echo "  boot.scr compiled with BMP logo display"
             # 不创建 extlinux.conf, 让 bootflow 使用 boot.scr (BMP 显示需要 boot.scr)
           else
