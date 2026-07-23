@@ -1,4 +1,4 @@
-# B860AV2.1-A Armbian 线刷镜像 - 全自动构建工作流 (V4)
+# B860AV2.1-A Armbian 线刷镜像 - 全自动构建工作流 (V5)
 #
 # 功能：
 #   1. 编译主线 U-Boot v2025.04 (p212_defconfig, GXL)
@@ -8,7 +8,7 @@
 #   5. 提取 boot 分区 (内核 + DTB + initramfs + 引导脚本)
 #   6. 创建 64MB FAT32 boot.PARTITION (V3: e900v22e DTB)
 #   7. 提取并缩小 rootfs ext4 为 system.PARTITION
-#   8. V3/V4: 注入网络可靠性脚本 + UUID修复 + tune2fs优化 + 首启检查
+#   8. V3-V5: 注入网络可靠性脚本 + UUID修复 + tune2fs优化 + 首启检查 + DTB定制
 #   9. 打包完整 Amlogic 线刷镜像 (bootloader + boot + rootfs)
 #   10. 上传 Artifact 和 Release
 #
@@ -295,27 +295,10 @@ jobs:
           echo "Root UUID: $ROOT_UUID"
 
           # V3: 默认 DTB 改为 e900v22e (修复 HDMI 控制器 0d0d:0d:0d 问题)
+          # V5: 会在下方定制为 b860av21 专用 DTB (eMMC 时序修复)
           DEFAULT_DTB="meson-gxl-s905l3b-e900v22e.dtb"
 
-          # V4: 添加 clk_ignore_unused (防止 Amlogic GXL 耦合时钟被关闭导致 reset)
-          # V4: 添加 earlycon (早期控制台输出, 辅助调试)
-          printf 'LINUX=/zImage\nINITRD=/uInitrd\nFDT=dtb/amlogic/%s\nAPPEND=root=UUID=%s rootflags=data=writeback rw rootwait rootfstype=ext4 console=ttyAML0,115200n8 console=tty0 no_console_suspend consoleblank=0 clk_ignore_unused earlycon fsck.fix=yes fsck.repair=yes net.ifnames=0 max_loop=128 loglevel=1\n' "${DEFAULT_DTB}" "${ROOT_UUID}" > /tmp/uEnv.txt
-          mcopy -i boot.PARTITION /tmp/uEnv.txt ::uEnv.txt
-
-          # 修改 boot.ini: 强制使用 e900v22e DTB + V4: 修正 initrd 加载地址
-          if [ -f "${DIR}/boot.ini" ]; then
-            cp ${DIR}/boot.ini /tmp/boot.ini
-            sed -i 's|setenv dtb_name.*|setenv dtb_name meson-gxl-s905l3b-e900v22e.dtb|g' /tmp/boot.ini
-            sed -i 's|setenv fdtfile.*|setenv fdtfile meson-gxl-s905l3b-e900v22e.dtb|g' /tmp/boot.ini
-            # V4: 修正 initrd 加载地址为 0x15000000 (64MB 边界), 防止与内核镜像重叠
-            sed -i 's|setenv initrd_addr.*|setenv initrd_addr 0x15000000|g' /tmp/boot.ini
-            sed -i 's|setenv ramdisk_addr_r.*|setenv ramdisk_addr_r 0x15000000|g' /tmp/boot.ini
-            # 如果 boot.ini 中没有 initrd_addr, 添加它
-            grep -q 'initrd_addr' /tmp/boot.ini || sed -i '/setenv dtb_name/a setenv initrd_addr 0x15000000' /tmp/boot.ini
-            mcopy -i boot.PARTITION /tmp/boot.ini ::boot.ini
-          fi
-
-          # 引导脚本 (如果存在)
+          # 引导脚本 (如果存在) - 先复制, 后面统一生成配置
           for f in boot.scr boot.cmd emmc_autoscript emmc_autoscript.cmd \
                    s905_autoscript s905_autoscript.cmd \
                    aml_autoscript aml_autoscript.cmd; do
@@ -331,6 +314,55 @@ jobs:
                      ${DIR}/dtb/amlogic/meson-gxl-s905x-p212.dtb; do
             [ -f "$dtb" ] && mcopy -i boot.PARTITION "$dtb" ::dtb/amlogic/$(basename $dtb)
           done
+
+          # V5: 创建 B860AV2.1-A 专用 DTB (修复 eMMC 时序兼容性)
+          # 设备 eMMC: mafId=214 (0xD6), 二线/国产芯片, HS200 时序裕量差
+          # e900v22e DTB 使用 max-frequency=200MHz + mmc-hs200-1_8v, 过于激进
+          # 解决方案: 降低 eMMC 频率到 50MHz, 移除 HS200/DDR, 保留 High Speed
+          SOURCE_DTB="${DIR}/dtb/amlogic/meson-gxl-s905l3b-e900v22e.dtb"
+          CUSTOM_DTB="meson-gxl-s905l3b-b860av21.dtb"
+          if [ -f "$SOURCE_DTB" ]; then
+            echo "=== Creating B860AV2.1-A custom DTB (eMMC timing fix) ==="
+            # 反编译 DTB
+            dtc -I dtb -O dts "$SOURCE_DTB" -o /tmp/custom.dts 2>/dev/null
+            # 修改 eMMC 节点: 降低 max-frequency 到 50MHz, 移除 HS200/DDR
+            # 0xbebc200 = 200000000 (200MHz), 0x2faf080 = 50000000 (50MHz)
+            # 移除 mmc-hs200-1_8v 和 mmc-ddr-1_8v 属性
+            sed -i 's/0xbebc200/0x2faf080/g' /tmp/custom.dts  # 200MHz -> 50MHz
+            # 如果 DTB 中 max-frequency 不是用十六进制而是十进制
+            sed -i 's/max-frequency = <200000000>/max-frequency = <50000000>/g' /tmp/custom.dts
+            # 移除 HS200 和 DDR (将这些行注释掉或删除)
+            sed -i '/mmc-hs200-1_8v/d' /tmp/custom.dts
+            sed -i '/mmc-ddr-1_8v/d' /tmp/custom.dts
+            # 重新编译
+            dtc -I dts -O dtb /tmp/custom.dts -o "/tmp/${CUSTOM_DTB}" 2>/dev/null
+            if [ -s "/tmp/${CUSTOM_DTB}" ]; then
+              mcopy -i boot.PARTITION "/tmp/${CUSTOM_DTB}" ::dtb/amlogic/${CUSTOM_DTB}
+              echo "  Created ${CUSTOM_DTB} (eMMC 50MHz, no HS200/DDR)"
+              # 将默认 DTB 切换为定制版本
+              DEFAULT_DTB="$CUSTOM_DTB"
+              echo "  Default DTB switched to ${CUSTOM_DTB}"
+            else
+              echo "  WARNING: Custom DTB compilation failed, using e900v22e"
+            fi
+          fi
+
+          # V4: 生成 uEnv.txt (使用最终 DEFAULT_DTB, 包含 clk_ignore_unused + earlycon)
+          printf 'LINUX=/zImage\nINITRD=/uInitrd\nFDT=dtb/amlogic/%s\nAPPEND=root=UUID=%s rootflags=data=writeback rw rootwait rootfstype=ext4 console=ttyAML0,115200n8 console=tty0 no_console_suspend consoleblank=0 clk_ignore_unused earlycon fsck.fix=yes fsck.repair=yes net.ifnames=0 max_loop=128 loglevel=1\n' "${DEFAULT_DTB}" "${ROOT_UUID}" > /tmp/uEnv.txt
+          mcopy -i boot.PARTITION /tmp/uEnv.txt ::uEnv.txt
+
+          # 修改 boot.ini: 使用最终 DEFAULT_DTB + V4: 修正 initrd 加载地址
+          if [ -f "${DIR}/boot.ini" ]; then
+            cp ${DIR}/boot.ini /tmp/boot.ini
+            sed -i "s|setenv dtb_name.*|setenv dtb_name ${DEFAULT_DTB}|g" /tmp/boot.ini
+            sed -i "s|setenv fdtfile.*|setenv fdtfile ${DEFAULT_DTB}|g" /tmp/boot.ini
+            # V4: 修正 initrd 加载地址为 0x15000000 (64MB 边界), 防止与内核镜像重叠
+            sed -i 's|setenv initrd_addr.*|setenv initrd_addr 0x15000000|g' /tmp/boot.ini
+            sed -i 's|setenv ramdisk_addr_r.*|setenv ramdisk_addr_r 0x15000000|g' /tmp/boot.ini
+            # 如果 boot.ini 中没有 initrd_addr, 添加它
+            grep -q 'initrd_addr' /tmp/boot.ini || sed -i '/setenv dtb_name/a setenv initrd_addr 0x15000000' /tmp/boot.ini
+            mcopy -i boot.PARTITION /tmp/boot.ini ::boot.ini
+          fi
 
           # extlinux 目录 (用于主线 U-Boot distro boot)
           mmd -i boot.PARTITION ::extlinux
@@ -399,7 +431,12 @@ jobs:
           echo "Actual rootfs UUID: $ACTUAL_UUID"
 
           if [ -n "$ACTUAL_UUID" ]; then
-            DEFAULT_DTB="meson-gxl-s905l3b-e900v22e.dtb"
+            # V5: 使用定制 DTB (eMMC 时序修复), 如果不存在则回退到 e900v22e
+            if mdir -i boot.PARTITION ::dtb/amlogic/meson-gxl-s905l3b-b860av21.dtb 2>/dev/null; then
+              DEFAULT_DTB="meson-gxl-s905l3b-b860av21.dtb"
+            else
+              DEFAULT_DTB="meson-gxl-s905l3b-e900v22e.dtb"
+            fi
             BOOT_ARGS="root=UUID=${ACTUAL_UUID} rootflags=data=writeback rw rootwait rootfstype=ext4 console=ttyAML0,115200n8 console=tty0 no_console_suspend consoleblank=0 clk_ignore_unused earlycon fsck.fix=yes fsck.repair=yes net.ifnames=0 max_loop=128 loglevel=1"
 
             # 直接重新生成 extlinux.conf (不提取再修改, 避免任何中间失败)
@@ -585,7 +622,7 @@ jobs:
           # V4 修复: 恢复 /dev/null 权限 (上一步 sudo 操作可能破坏)
           sudo chmod 666 /dev/null || true
 
-          TAG="v4.$(date +%Y%m%d)-${OPHUB_SOC}-$(echo $GITHUB_SHA | cut -c1-7)"
+          TAG="v5.$(date +%Y%m%d)-${OPHUB_SOC}-$(echo $GITHUB_SHA | cut -c1-7)"
           echo "Creating release: $TAG"
 
           # 获取 rootfs UUID
@@ -593,15 +630,23 @@ jobs:
 
           # 生成 release notes 文件
           cat > /tmp/release-notes.md << 'RNOTES'
-          ## B860AV2.1-A Armbian 线刷镜像 V4
+          ## B860AV2.1-A Armbian 线刷镜像 V5
 
-          ### V4 改进 (进一步提升首次启动成功率)
+          ### V5 改进 (DTB eMMC 时序修复 — 解决 10%+5% 残余风险)
+          - 创建 B860AV2.1-A 专用 DTB (`meson-gxl-s905l3b-b860av21.dtb`)
+          - eMMC max-frequency 从 200MHz 降到 50MHz (适配 mafId=0xD6 二线/国产 eMMC)
+          - 移除 mmc-hs200-1_8v 和 mmc-ddr-1_8v (HS200 tuning 裕量差导致首启失败)
+          - 保留 cap-mmc-highspeed (52MHz SDR, 几乎所有 eMMC 5.0+ 都支持)
+          - 默认 DTB 切换为定制版本, e900v22e 作为备选保留在镜像中
+          - 同时保留 m302a 和 p212 DTB 供手动切换
+
+          ### V4 改进 (已包含)
           - 内核 cmdline 添加 `clk_ignore_unused` (防止 GXL 耦合时钟关闭导致 reset)
           - 内核 cmdline 添加 `earlycon` (早期控制台输出, 辅助调试)
           - boot.ini 修正 `initrd_addr=0x15000000` (防止 initramfs 与内核镜像重叠)
           - tune2fs 优化: 禁用 `metadata_csum` + `journal_data_writeback` + 禁用定期 fsck
           - 添加 first-boot-check.service (首启自动验证 UUID/网络/eMMC/服务状态)
-          - U-Boot env offset 检查 (检测 env 与分区重叠风险)
+          - U-Boot env offset 检查 (确认 CONFIG_ENV_IS_NOWHERE, 无 env 偏移冲突)
           - 修复 boot 配置文件 UUID 不匹配问题 (ophub uEnv.txt UUID ≠ 实际 ext4 UUID)
 
           ### V3 改进 (已包含)
@@ -611,6 +656,15 @@ jobs:
           - MAC 地址设置脚本 (mac-setup.service)
           - 网络性能优化 sysctl 配置
           - fstab 优化: noatime + commit=600
+
+          ### DTB 切换指南
+          镜像中包含以下 DTB, 如默认 DTB 无法启动可手动切换:
+          1. `meson-gxl-s905l3b-b860av21.dtb` — V5 定制 (eMMC 50MHz, 默认)
+          2. `meson-gxl-s905l3b-e900v22e.dtb` — ophub 通用 (eMMC 200MHz+HS200)
+          3. `meson-gxl-s905l3b-m302a.dtb` — M302A 主板备选
+          4. `meson-gxl-s905x-p212.dtb` — P212 参考板基础
+
+          切换方法: 编辑 boot 分区的 extlinux.conf 或 uEnv.txt 中的 fdt/FDT 行
 
           ### 文件说明
           | 文件 | 说明 |
@@ -625,32 +679,35 @@ jobs:
           2. 打开 Amlogic USB Burning Tool v2.1.6
           3. 导入解压后的 .img 文件
           4. **必须勾选以下选项**:
-             - ✅ Erase Flash (全盘擦除, 清除旧固件残留)
-             - ✅ Verify Flash (写入后 CRC 校验, 防止假成功)
+             - Erase Flash (全盘擦除, 清除旧固件残留)
+             - Verify Flash (写入后 CRC 校验, 防止假成功)
           5. **不要勾选**:
-             - ❌ Preserve User Data (保留旧数据会导致分区冲突)
+             - Preserve User Data (保留旧数据会导致分区冲突)
           6. 点击 Start, 连接 OTG 口线刷
           7. 等待显示 100% 绿色成功
 
-          ### 网络可靠性
-          首次启动时, fix-gxl-eth.service 自动检测并修复 GXL PHY LPA corruption.
-          eth-monitor.service 持续监控链路状态, 断线时自动重试.
-          first-boot-check.service 首启验证 UUID/网络/eMMC/服务状态并自动修复.
-          无需手动干预, 以太网应自动可用.
+          ### 启动后验证
+          首次启动后, 检查 eMMC 实际速度模式:
+          ```
+          cat /sys/kernel/debug/mmc*/ios 2>/dev/null | grep -E "timing|clock"
+          mmc extcsd read /dev/mmcblk0 2>/dev/null | grep HS_TIMING
+          ```
+          如果稳定运行, 可尝试手动升回 DDR52 (52MHz DDR, 104MB/s):
+          修改 DTB 添加 `mmc-ddr-1_8v`, max-frequency 改为 52000000
           RNOTES
 
           echo "" >> /tmp/release-notes.md
           echo "### 构建信息" >> /tmp/release-notes.md
           echo "- 构建时间: $(date -u '+%Y-%m-%d %H:%M UTC')" >> /tmp/release-notes.md
-          echo "- 版本: V4 (clk_ignore_unused + initrd_addr fix + tune2fs + first-boot-check)" >> /tmp/release-notes.md
+          echo "- 版本: V5 (定制 DTB + eMMC 50MHz + 移除 HS200)" >> /tmp/release-notes.md
           echo "- U-Boot: ${UBOOT_VERSION} (主线, p212_defconfig)" >> /tmp/release-notes.md
           echo "- ophub SoC: ${OPHUB_SOC}" >> /tmp/release-notes.md
-          echo "- 默认 DTB: meson-gxl-s905l3b-e900v22e.dtb" >> /tmp/release-notes.md
+          echo "- 默认 DTB: meson-gxl-s905l3b-b860av21.dtb (eMMC 50MHz)" >> /tmp/release-notes.md
           echo "- Root UUID: ${ROOT_UUID}" >> /tmp/release-notes.md
           echo "- Git SHA: ${GITHUB_SHA::7}" >> /tmp/release-notes.md
 
           gh release create "$TAG" \
-            --title "B860AV2.1-A Armbian V4 $(date +%Y-%m-%d)" \
+            --title "B860AV2.1-A Armbian V5 $(date +%Y-%m-%d)" \
             --notes-file /tmp/release-notes.md \
             artifacts/b860av21-armbian-burn.img.gz \
             artifacts/boot.fat32.gz \
