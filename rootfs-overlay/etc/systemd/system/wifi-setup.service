@@ -1,0 +1,15 @@
+[Unit]
+Description=B860AV2.1-A WiFi Auto-Detection and Setup
+After=NetworkManager.service fix-gxl-eth.service
+Wants=NetworkManager.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/wifi-setup.sh
+RemainAfterExit=yes
+TimeoutStartSec=30
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target

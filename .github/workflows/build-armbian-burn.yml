@@ -1,4 +1,4 @@
-# B860AV2.1-A Armbian 线刷镜像 - 全自动构建工作流 (V5)
+# B860AV2.1-A Armbian 线刷镜像 - 全自动构建工作流 (V6)
 #
 # 功能：
 #   1. 编译主线 U-Boot v2025.04 (p212_defconfig, GXL)
@@ -9,8 +9,9 @@
 #   6. 创建 64MB FAT32 boot.PARTITION (V3: e900v22e DTB)
 #   7. 提取并缩小 rootfs ext4 为 system.PARTITION
 #   8. V3-V5: 注入网络可靠性脚本 + UUID修复 + tune2fs优化 + 首启检查 + DTB定制
-#   9. 打包完整 Amlogic 线刷镜像 (bootloader + boot + rootfs)
-#   10. 上传 Artifact 和 Release
+#   9. V6: 内置 WiFi 固件 (SSV6051) + WiFi 自动检测脚本 + 连接助手
+#   10. 打包完整 Amlogic 线刷镜像 (bootloader + boot + rootfs)
+#   11. 上传 Artifact 和 Release
 #
 # 使用方法：
 #   方式 1 (手动触发): Actions → Build Armbian Burn Image → Run workflow
@@ -466,6 +467,21 @@ jobs:
           truncate -s ${TARGET_MB}M system.PARTITION
           resize2fs system.PARTITION 2>&1 | tail -3
 
+          # V6: 下载 WiFi 固件 (SSV6051 不包含在 ophub 默认固件中)
+          echo "=== Downloading WiFi firmware ==="
+          mkdir -p /tmp/wifi-firmware/ssv6051
+          FW_BASE="https://raw.githubusercontent.com/armbian/firmware/master"
+          # SSV6051 / SV6256P 固件 (硅谷数模, B860AV2.1 固件中的 ssv_dump_flash 服务对应)
+          wget -q -O /tmp/wifi-firmware/ssv6051-sw.bin    "${FW_BASE}/ssv6051-sw.bin"    || true
+          wget -q -O /tmp/wifi-firmware/ssv6051-wifi.cfg  "${FW_BASE}/ssv6051-wifi.cfg"  || true
+          wget -q -O /tmp/wifi-firmware/ssv6x5x-sw.bin    "${FW_BASE}/ssv6x5x-sw.bin"    || true
+          wget -q -O /tmp/wifi-firmware/ssv6x5x-wifi.cfg  "${FW_BASE}/ssv6x5x-wifi.cfg"  || true
+          # 复制到 ssv6051 子目录 (部分驱动版本从此路径加载)
+          cp /tmp/wifi-firmware/ssv6051-sw.bin   /tmp/wifi-firmware/ssv6051/ 2>/dev/null || true
+          cp /tmp/wifi-firmware/ssv6051-wifi.cfg /tmp/wifi-firmware/ssv6051/ 2>/dev/null || true
+          echo "WiFi firmware downloaded:"
+          ls -la /tmp/wifi-firmware/ /tmp/wifi-firmware/ssv6051/ 2>/dev/null
+
           # 挂载 rootfs (关键操作: 失败则退出)
           sudo mkdir -p /mnt/rootfs
           if ! sudo mount -o loop system.PARTITION /mnt/rootfs; then
@@ -483,11 +499,30 @@ jobs:
             echo "WARNING: rootfs-overlay directory not found"
           fi
 
+          # V6: 注入 WiFi 固件到 rootfs
+          echo "=== Injecting WiFi firmware into rootfs ==="
+          sudo mkdir -p /mnt/rootfs/lib/firmware/ssv6051
+          # SSV6051 固件放到 /lib/firmware/ 和 /lib/firmware/ssv6051/ 两个路径
+          # (不同驱动版本查找路径不同)
+          for fw in ssv6051-sw.bin ssv6051-wifi.cfg ssv6x5x-sw.bin ssv6x5x-wifi.cfg; do
+            if [ -f "/tmp/wifi-firmware/$fw" ]; then
+              sudo cp "/tmp/wifi-firmware/$fw" /mnt/rootfs/lib/firmware/
+              echo "  Installed: /lib/firmware/$fw"
+            fi
+          done
+          # 复制到 ssv6051 子目录
+          sudo cp /tmp/wifi-firmware/ssv6051/* /mnt/rootfs/lib/firmware/ssv6051/ 2>/dev/null || true
+          echo "WiFi firmware injection complete"
+          sudo ls -la /mnt/rootfs/lib/firmware/ssv6051* 2>/dev/null
+
           # 设置脚本权限
           sudo chmod 755 /mnt/rootfs/usr/local/bin/fix-gxl-eth.sh 2>/dev/null
           sudo chmod 755 /mnt/rootfs/usr/local/bin/eth-monitor.sh 2>/dev/null
           sudo chmod 755 /mnt/rootfs/usr/local/bin/mac-setup.sh 2>/dev/null
           sudo chmod 755 /mnt/rootfs/usr/local/bin/first-boot-check.sh 2>/dev/null
+          # V6: WiFi 脚本权限
+          sudo chmod 755 /mnt/rootfs/usr/local/bin/wifi-setup.sh 2>/dev/null
+          sudo chmod 755 /mnt/rootfs/usr/local/bin/wifi-connect.sh 2>/dev/null
 
           # 启用 systemd 服务 (创建符号链接)
           sudo mkdir -p /mnt/rootfs/etc/systemd/system/multi-user.target.wants
@@ -499,6 +534,9 @@ jobs:
             /mnt/rootfs/etc/systemd/system/multi-user.target.wants/mac-setup.service
           sudo ln -sf /etc/systemd/system/first-boot-check.service \
             /mnt/rootfs/etc/systemd/system/multi-user.target.wants/first-boot-check.service
+          # V6: WiFi 自动检测服务
+          sudo ln -sf /etc/systemd/system/wifi-setup.service \
+            /mnt/rootfs/etc/systemd/system/multi-user.target.wants/wifi-setup.service
           echo "Systemd services enabled"
 
           # 优化 fstab (ophub 通常已优化, 仅在未优化时处理)
@@ -515,6 +553,8 @@ jobs:
 
           # 设置配置文件权限
           sudo chmod 644 /mnt/rootfs/etc/NetworkManager/conf.d/10-eth-managed.conf 2>/dev/null
+          # V6: WiFi NetworkManager 配置
+          sudo chmod 644 /mnt/rootfs/etc/NetworkManager/conf.d/20-wifi-managed.conf 2>/dev/null
           sudo chmod 644 /mnt/rootfs/etc/sysctl.d/99-gxl-network.conf 2>/dev/null
           sudo chmod 644 /mnt/rootfs/etc/systemd/system/*.service 2>/dev/null
 
@@ -525,6 +565,12 @@ jobs:
           sudo ls -la /mnt/rootfs/usr/local/bin/mac-setup.sh || echo "MISSING: mac-setup.sh"
           sudo ls -la /mnt/rootfs/usr/local/bin/first-boot-check.sh || echo "MISSING: first-boot-check.sh"
           sudo ls -la /mnt/rootfs/etc/systemd/system/fix-gxl-eth.service || echo "MISSING: fix-gxl-eth.service"
+          # V6: WiFi 文件验证
+          sudo ls -la /mnt/rootfs/usr/local/bin/wifi-setup.sh || echo "MISSING: wifi-setup.sh"
+          sudo ls -la /mnt/rootfs/usr/local/bin/wifi-connect.sh || echo "MISSING: wifi-connect.sh"
+          sudo ls -la /mnt/rootfs/etc/systemd/system/wifi-setup.service || echo "MISSING: wifi-setup.service"
+          sudo ls -la /mnt/rootfs/lib/firmware/ssv6051-sw.bin || echo "MISSING: ssv6051-sw.bin"
+          sudo ls -la /mnt/rootfs/etc/NetworkManager/conf.d/20-wifi-managed.conf || echo "MISSING: 20-wifi-managed.conf"
           sudo ls -la /mnt/rootfs/etc/systemd/system/multi-user.target.wants/
 
           # 同步并卸载 (关键操作: 失败则退出)
@@ -622,7 +668,7 @@ jobs:
           # V4 修复: 恢复 /dev/null 权限 (上一步 sudo 操作可能破坏)
           sudo chmod 666 /dev/null || true
 
-          TAG="v5.$(date +%Y%m%d)-${OPHUB_SOC}-$(echo $GITHUB_SHA | cut -c1-7)"
+          TAG="v6.$(date +%Y%m%d)-${OPHUB_SOC}-$(echo $GITHUB_SHA | cut -c1-7)"
           echo "Creating release: $TAG"
 
           # 获取 rootfs UUID
@@ -630,9 +676,42 @@ jobs:
 
           # 生成 release notes 文件
           cat > /tmp/release-notes.md << 'RNOTES'
-          ## B860AV2.1-A Armbian 线刷镜像 V5
+          ## B860AV2.1-A Armbian 线刷镜像 V6
 
-          ### V5 改进 (DTB eMMC 时序修复 — 解决 10%+5% 残余风险)
+          ### V6 改进 (WiFi 内置适配)
+          - 内置 SSV6051/SV6256P WiFi 固件 (硅谷数模, B860AV2.1 固件 ssv_dump_flash 服务对应)
+          - 固件路径: /lib/firmware/ 和 /lib/firmware/ssv6051/ (兼容不同驱动版本)
+          - UWE5622 固件已由 ophub 默认包含 (紫光展锐, unisoc_wpa_s 服务对应)
+          - MT7601U 固件已由 ophub 默认包含 (联发科, zte-7601-cp 服务对应)
+          - WiFi 自动检测脚本 (wifi-setup.sh): 开机自动加载驱动 + 检测接口 + 配置 NetworkManager
+          - WiFi 连接助手 (wifi-connect.sh): 一键扫描/连接/断开 WiFi 网络
+          - WiFi systemd 服务 (wifi-setup.service): 开机自动执行, 不影响启动速度
+          - NetworkManager WiFi 配置: 禁用 MAC 随机化 + 禁用省电模式 (提升稳定性)
+          - 支持 30+ 种 WiFi 驱动自动探测 (主线 + 树外驱动)
+          - NW (无 WiFi) 版本自动跳过, 不产生错误
+
+          ### WiFi 使用方法
+          ```
+          # 扫描 WiFi 网络
+          wifi-connect.sh scan
+
+          # 连接 WiFi (WPA/WPA2)
+          wifi-connect.sh "你的WiFi名" "你的密码"
+
+          # 连接开放网络 (无密码)
+          wifi-connect.sh "你的WiFi名"
+
+          # 查看连接状态
+          wifi-connect.sh status
+
+          # 断开连接
+          wifi-connect.sh disconnect
+
+          # 或者使用交互式工具
+          nmtui
+          ```
+
+          ### V5 改进 (DTB eMMC 时序修复 — 已包含)
           - 创建 B860AV2.1-A 专用 DTB (`meson-gxl-s905l3b-b860av21.dtb`)
           - eMMC max-frequency 从 200MHz 降到 50MHz (适配 mafId=0xD6 二线/国产 eMMC)
           - 移除 mmc-hs200-1_8v 和 mmc-ddr-1_8v (HS200 tuning 裕量差导致首启失败)
@@ -699,15 +778,16 @@ jobs:
           echo "" >> /tmp/release-notes.md
           echo "### 构建信息" >> /tmp/release-notes.md
           echo "- 构建时间: $(date -u '+%Y-%m-%d %H:%M UTC')" >> /tmp/release-notes.md
-          echo "- 版本: V5 (定制 DTB + eMMC 50MHz + 移除 HS200)" >> /tmp/release-notes.md
+          echo "- 版本: V6 (WiFi 内置适配 + 定制 DTB + eMMC 50MHz + 移除 HS200)" >> /tmp/release-notes.md
           echo "- U-Boot: ${UBOOT_VERSION} (主线, p212_defconfig)" >> /tmp/release-notes.md
           echo "- ophub SoC: ${OPHUB_SOC}" >> /tmp/release-notes.md
           echo "- 默认 DTB: meson-gxl-s905l3b-b860av21.dtb (eMMC 50MHz)" >> /tmp/release-notes.md
+          echo "- WiFi 固件: SSV6051 (内置) + UWE5622 (ophub内置) + MT7601U (ophub内置)" >> /tmp/release-notes.md
           echo "- Root UUID: ${ROOT_UUID}" >> /tmp/release-notes.md
           echo "- Git SHA: ${GITHUB_SHA::7}" >> /tmp/release-notes.md
 
           gh release create "$TAG" \
-            --title "B860AV2.1-A Armbian V5 $(date +%Y-%m-%d)" \
+            --title "B860AV2.1-A Armbian V6 $(date +%Y-%m-%d)" \
             --notes-file /tmp/release-notes.md \
             artifacts/b860av21-armbian-burn.img.gz \
             artifacts/boot.fat32.gz \
