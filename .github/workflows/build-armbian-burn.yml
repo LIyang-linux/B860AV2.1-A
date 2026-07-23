@@ -6,7 +6,7 @@
 #   3. 用 gxlimg 重新打包 FIP (原厂 BL + 主线 U-Boot)
 #   4. 下载 ophub S905L3-B Armbian 镜像
 #   5. 提取 boot 分区 (内核 + DTB + initramfs + 引导脚本)
-#   6. 创建 64MB FAT32 boot.PARTITION (V3: e900v22e DTB)
+#   6. 创建 64MB FAT32 boot.PARTITION (V3: e900v22e DTB; V6.2: logo 压缩至 2.6MB 以适配)
 #   7. 提取并缩小 rootfs ext4 为 system.PARTITION
 #   8. V3-V5: 注入网络可靠性脚本 + UUID修复 + tune2fs优化 + 首启检查 + DTB定制
 #   9. V6: 内置 WiFi 固件 (SSV6051) + WiFi 自动检测脚本 + 连接助手
@@ -111,20 +111,29 @@ jobs:
           BMP_INFO=$(file "$LOGO_SRC")
           echo "Logo file info: $BMP_INFO"
 
+          # 目标规格: 1280x720 24-bit 无压缩 BMP3 (~2.6MB, 适配 64MB boot 分区)
+          TARGET_W=1280
+          TARGET_H=720
+          TARGET_DEPTH=24
+
           if echo "$BMP_INFO" | grep -q "PC bitmap"; then
             # 已是 BMP 格式, 验证分辨率和色深
             DIMS=$(identify -format "%wx%h" "$LOGO_SRC" 2>/dev/null)
             DEPTH=$(identify -format "%[depth]" "$LOGO_SRC" 2>/dev/null)
             echo "BMP dimensions: $DIMS, depth: $DEPTH bit"
-            if [ "$DIMS" != "1920x1080" ] || [ "$DEPTH" != "24" ]; then
-              echo "Converting BMP to 1920x1080 24-bit..."
-              convert "$LOGO_SRC" -resize 1920x1080! -depth 24 -type TrueColor -compress None BMP3:"${LOGO_SRC}.tmp"
+            W=$(echo "$DIMS" | cut -dx -f1)
+            H=$(echo "$DIMS" | cut -dx -f2)
+            # 如果分辨率或色深不符合, 或文件大于 3MB, 压缩转换
+            LOGO_SIZE=$(stat -c%s "$LOGO_SRC" 2>/dev/null || echo 0)
+            if [ "$W" != "$TARGET_W" ] || [ "$H" != "$TARGET_H" ] || [ "$DEPTH" != "$TARGET_DEPTH" ] || [ "$LOGO_SIZE" -gt 3145728 ]; then
+              echo "Converting BMP to ${TARGET_W}x${TARGET_H} ${TARGET_DEPTH}-bit (size: ${LOGO_SIZE} bytes)..."
+              convert "$LOGO_SRC" -resize ${TARGET_W}x${TARGET_H}! -depth ${TARGET_DEPTH} -type TrueColor -compress None BMP3:"${LOGO_SRC}.tmp"
               mv "${LOGO_SRC}.tmp" "$LOGO_SRC"
             fi
           else
             # 非 BMP 格式 (如 JPEG/PNG), 转换
-            echo "Converting to U-Boot compatible BMP (1920x1080, 24-bit, uncompressed)..."
-            convert "$LOGO_SRC" -resize 1920x1080! -depth 24 -type TrueColor -compress None BMP3:"${LOGO_SRC}.tmp"
+            echo "Converting to U-Boot compatible BMP (${TARGET_W}x${TARGET_H}, ${TARGET_DEPTH}-bit, uncompressed)..."
+            convert "$LOGO_SRC" -resize ${TARGET_W}x${TARGET_H}! -depth ${TARGET_DEPTH} -type TrueColor -compress None BMP3:"${LOGO_SRC}.tmp"
             mv "${LOGO_SRC}.tmp" "$LOGO_SRC"
           fi
 
@@ -475,6 +484,11 @@ jobs:
           setenv logo_addr 0x20000000
           if test "${devtype}" = ""; then setenv devtype "mmc"; fi
           if test "${devnum}" = ""; then setenv devnum 0; fi
+          # Set HDMI to 720p for logo display (logo is 1280x720)
+          setenv outputmode 720p60hz
+          setenv hdmimode 720p60hz
+          osd open
+          osd clear
           # Display boot logo (covers black screen during kernel init + rootfs resize)
           if load ${devtype} ${devnum} ${logo_addr} logo.bmp; then
             bmp display ${logo_addr} 0 0
