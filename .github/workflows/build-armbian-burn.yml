@@ -365,19 +365,29 @@ jobs:
           echo "Actual rootfs UUID: $ACTUAL_UUID"
           if [ -n "$ACTUAL_UUID" ]; then
             echo "Updating boot.PARTITION with correct UUID..."
-            # 更新 extlinux.conf
-            mtype -i boot.PARTITION ::extlinux/extlinux.conf 2>/dev/null | \
-              sed "s|root=UUID=[a-f0-9-]*|root=UUID=$ACTUAL_UUID|" > /tmp/extlinux.conf
-            mcopy -i boot.PARTITION /tmp/extlinux.conf ::extlinux/extlinux.conf
-            # 更新 uEnv.txt
-            mtype -i boot.PARTITION ::uEnv.txt 2>/dev/null | \
-              sed "s|root=UUID=[a-f0-9-]*|root=UUID=$ACTUAL_UUID|" > /tmp/uEnv.txt
-            mcopy -i boot.PARTITION /tmp/uEnv.txt ::uEnv.txt
-            # 更新 boot.ini (如果包含 UUID)
-            if mtype -i boot.PARTITION ::boot.ini 2>/dev/null | grep -q "root=UUID="; then
-              mtype -i boot.PARTITION ::boot.ini 2>/dev/null | \
-                sed "s|root=UUID=[a-f0-9-]*|root=UUID=$ACTUAL_UUID|" > /tmp/boot.ini
+            # extlinux.conf
+            rm -f /tmp/extlinux.conf
+            mcopy -i boot.PARTITION ::extlinux/extlinux.conf /tmp/extlinux.conf 2>/dev/null || true
+            if [ -s /tmp/extlinux.conf ]; then
+              sed -i "s|root=UUID=[a-f0-9-]*|root=UUID=$ACTUAL_UUID|g" /tmp/extlinux.conf
+              mcopy -i boot.PARTITION /tmp/extlinux.conf ::extlinux/extlinux.conf
+              echo "  Updated extlinux.conf"
+            fi
+            # uEnv.txt
+            rm -f /tmp/uEnv.txt
+            mcopy -i boot.PARTITION ::uEnv.txt /tmp/uEnv.txt 2>/dev/null || true
+            if [ -s /tmp/uEnv.txt ]; then
+              sed -i "s|root=UUID=[a-f0-9-]*|root=UUID=$ACTUAL_UUID|g" /tmp/uEnv.txt
+              mcopy -i boot.PARTITION /tmp/uEnv.txt ::uEnv.txt
+              echo "  Updated uEnv.txt"
+            fi
+            # boot.ini (仅当包含 UUID 时)
+            rm -f /tmp/boot.ini
+            mcopy -i boot.PARTITION ::boot.ini /tmp/boot.ini 2>/dev/null || true
+            if [ -s /tmp/boot.ini ] && grep -q "root=UUID=" /tmp/boot.ini; then
+              sed -i "s|root=UUID=[a-f0-9-]*|root=UUID=$ACTUAL_UUID|g" /tmp/boot.ini
               mcopy -i boot.PARTITION /tmp/boot.ini ::boot.ini
+              echo "  Updated boot.ini"
             fi
             echo "UUID updated in boot.PARTITION"
           fi
