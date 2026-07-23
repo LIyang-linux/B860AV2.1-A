@@ -1,0 +1,19 @@
+# Large image files (use GitHub Releases instead)
+*.img
+*.img.gz
+
+# Large partition images
+rootfs.ext4
+system.PARTITION
+data.PARTITION
+
+# Build artifacts
+*.o
+*.ko
+*.cmd
+.tmp_versions/
+
+# Sensitive files
+*.token
+*.pat
+credentials*
