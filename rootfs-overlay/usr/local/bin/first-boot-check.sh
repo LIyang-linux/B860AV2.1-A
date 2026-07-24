@@ -128,7 +128,7 @@ if [ -n "$ROOT_ERRORS" ]; then
 fi
 
 # 5. 检查关键服务
-for svc in fix-gxl-eth.service eth-monitor.service mac-setup.service wifi-setup.service system-optimization.service; do
+for svc in fix-gxl-eth.service eth-monitor.service mac-setup.service wifi-setup.service system-optimization.service gpu-setup.service; do
     if systemctl is-enabled "$svc" &>/dev/null; then
         log "Service $svc: enabled"
     else

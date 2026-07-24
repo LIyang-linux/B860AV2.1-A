@@ -1,0 +1,14 @@
+[Unit]
+Description=Mali-450 GPU (lima) Driver Setup
+After=systemd-modules-load.service
+ConditionPathExists=/usr/local/bin/gpu-setup.sh
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/gpu-setup.sh
+RemainAfterExit=yes
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target

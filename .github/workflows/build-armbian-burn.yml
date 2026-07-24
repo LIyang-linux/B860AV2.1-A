@@ -1,4 +1,4 @@
-# B860AV2.1-A Armbian 线刷镜像 - 全自动构建工作流 (V6.3)
+# B860AV2.1-A Armbian 线刷镜像 - 全自动构建工作流 (V6.4)
 #
 # 功能：
 #   1. 编译主线 U-Boot v2025.04 (p212_defconfig, GXL)
@@ -14,8 +14,9 @@
 #  11. V6.1: 锁定内核 6.1.y LTS + 版本号带日期标签
 #  12. V6.2: U-Boot 启动 Logo (BMP) 消除黑屏 + boot.scr 引导脚本
 #  13. V6.3: 内核来源回退 (ophub 已移除 6.1.y, 改用仓库 Release 存档 + deb 包升级)
-#  14. 打包完整 Amlogic 线刷镜像 (bootloader + boot + rootfs)
-#  15. 上传 Artifact 和 Release
+#  14. V6.4: GPU 加速 — Mali-450 lima 驱动 + Mesa 用户空间驱动内置
+#  15. 打包完整 Amlogic 线刷镜像 (bootloader + boot + rootfs)
+#  16. 上传 Artifact 和 Release
 #
 # 使用方法：
 #   方式 1 (手动触发): Actions → Build Armbian Burn Image → Run workflow
@@ -74,7 +75,7 @@ env:
   UBOOT_VERSION: ${{ github.event.inputs.uboot_version || 'v2025.04' }}
   OPHUB_SOC: ${{ github.event.inputs.ophub_soc || 's905l3b' }}
   KERNEL_VERSION: ${{ github.event.inputs.kernel_version || '6.1' }}
-  BUILD_VERSION: 'v6.3'
+  BUILD_VERSION: 'v6.4'
 
 jobs:
   build:
@@ -805,12 +806,12 @@ jobs:
             echo "WARNING: Could not determine actual UUID, skipping UUID fix"
           fi
 
-          # 扩展 rootfs 增加 50MB 空间用于注入
+          # 扩展 rootfs 增加 250MB 空间用于注入 (V6.4: +200MB for Mesa GPU 驱动)
           e2fsck -fy system.PARTITION 2>&1 | tail -3
           CURRENT_BLOCKS=$(dumpe2fs -h system.PARTITION 2>/dev/null | grep 'Block count' | awk '{print $3}')
           BLKSIZE=$(dumpe2fs -h system.PARTITION 2>/dev/null | grep 'Block size' | awk '{print $3}')
           CURRENT_MB=$(( CURRENT_BLOCKS * BLKSIZE / 1024 / 1024 ))
-          TARGET_MB=$(( CURRENT_MB + 50 ))
+          TARGET_MB=$(( CURRENT_MB + 250 ))
           echo "Expanding rootfs: ${CURRENT_MB}MB -> ${TARGET_MB}MB"
           truncate -s ${TARGET_MB}M system.PARTITION
           resize2fs system.PARTITION 2>&1 | tail -3
@@ -888,6 +889,153 @@ jobs:
           echo "WiFi firmware injection complete"
           sudo ls -la /mnt/rootfs/lib/firmware/ssv6051* 2>/dev/null
 
+          # V6.4: 验证 lima 内核模块存在 (ophub stable config-6.1 已启用 CONFIG_DRM_LIMA=m)
+          echo "=== V6.4: Verifying lima kernel module ==="
+          LIMA_KO=$(sudo find /mnt/rootfs/usr/lib/modules -name "lima.ko" 2>/dev/null | head -1)
+          if [ -n "$LIMA_KO" ]; then
+            echo "  lima.ko found: $LIMA_KO"
+            echo "  Mali-450 GPU kernel driver is available"
+          else
+            echo "  WARNING: lima.ko not found in kernel modules!"
+            echo "  GPU acceleration will not work. Check ophub kernel config."
+            # 搜索所有 .ko 确认模块目录结构
+            echo "  Total .ko files: $(sudo find /mnt/rootfs/usr/lib/modules -name '*.ko' 2>/dev/null | wc -l)"
+            echo "  DRM related modules:"
+            sudo find /mnt/rootfs/usr/lib/modules -name "*drm*" -o -name "*lima*" -o -name "*meson*" 2>/dev/null | head -20
+          fi
+
+          # V6.4: 安装 Mesa GPU 用户空间驱动 (lima gallium driver)
+          echo "=== V6.4: Installing Mesa GPU userspace drivers ==="
+          # 方法: 下载 arm64 deb 包并提取到 rootfs (避免 chroot/qemu 复杂性)
+          # 配置 apt arm64 源
+          sudo dpkg --add-architecture arm64 2>/dev/null || true
+          # 检查是否已有 arm64 源, 避免重复添加
+          if ! grep -r "ports.ubuntu.com" /etc/apt/sources.list.d/ 2>/dev/null | grep -q arm64; then
+            echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ jammy main universe" | sudo tee /etc/apt/sources.list.d/arm64-ports.list
+            echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ jammy-updates main universe" | sudo tee -a /etc/apt/sources.list.d/arm64-ports.list
+          fi
+          sudo apt-get update -qq 2>/dev/null || true
+
+          # 下载 arm64 Mesa 相关包 (含关键依赖 libglapi-mesa)
+          mkdir -p /tmp/mesa-debs
+          cd /tmp/mesa-debs
+          echo "  Downloading arm64 Mesa packages..."
+          # 逐个下载, 避免单个失败导致全部丢失
+          for pkg in \
+            libgl1-mesa-dri:arm64 \
+            libglapi-mesa:arm64 \
+            mesa-utils:arm64 \
+            libegl-mesa0:arm64 \
+            libegl1:arm64 \
+            libgles2:arm64 \
+            libgbm1:arm64 \
+            libgl1:arm64 \
+            libglx-mesa0:arm64 \
+            libdrm2:arm64 \
+            libexpat1:arm64 \
+            libxshmfence1:arm64 \
+            libxxf86vm1:arm64 \
+            libxcb-dri2-0:arm64 \
+            libxcb-dri3-0:arm64 \
+            libxcb-glx0:arm64; do
+            apt-get download "$pkg" 2>/dev/null && echo "    OK: $pkg" || echo "    SKIP: $pkg (not found or already satisfied)"
+          done
+
+          if ls *.deb 2>/dev/null | grep -q .; then
+            echo "  Downloaded packages:"
+            ls -lh *.deb
+
+            # 提取所有 deb 包到临时目录
+            mkdir -p /tmp/mesa-extract
+            for deb in *.deb; do
+              dpkg-deb -x "$deb" /tmp/mesa-extract/ 2>/dev/null || true
+            done
+
+            # 复制 Mesa 库文件到 rootfs
+            echo "  Copying Mesa files to rootfs..."
+            if [ -d /tmp/mesa-extract/usr/lib/aarch64-linux-gnu ]; then
+              sudo cp -a /tmp/mesa-extract/usr/lib/aarch64-linux-gnu/* \
+                /mnt/rootfs/usr/lib/aarch64-linux-gnu/ 2>/dev/null || true
+            fi
+            # 复制可执行文件 (glxinfo, glxgears 等)
+            if [ -d /tmp/mesa-extract/usr/bin ]; then
+              sudo cp -a /tmp/mesa-extract/usr/bin/* \
+                /mnt/rootfs/usr/bin/ 2>/dev/null || true
+            fi
+            # 复制配置文件 (如有)
+            if [ -d /tmp/mesa-extract/etc ]; then
+              sudo cp -a /tmp/mesa-extract/etc/* \
+                /mnt/rootfs/etc/ 2>/dev/null || true
+            fi
+            # 复制 share 文件 (drirc, 等)
+            if [ -d /tmp/mesa-extract/usr/share ]; then
+              sudo mkdir -p /mnt/rootfs/usr/share
+              sudo cp -a /tmp/mesa-extract/usr/share/* \
+                /mnt/rootfs/usr/share/ 2>/dev/null || true
+            fi
+
+            # 验证 lima_dri.so 是否安装成功
+            LIMA_DRI=$(sudo find /mnt/rootfs/usr/lib -name "lima_dri.so" 2>/dev/null | head -1)
+            if [ -n "$LIMA_DRI" ]; then
+              echo "  SUCCESS: Mesa lima DRI driver installed: $LIMA_DRI"
+              echo "  Mali-450 GPU acceleration is ready"
+            else
+              echo "  WARNING: lima_dri.so not found after installation!"
+              echo "  Mesa may not include lima driver in this version"
+            fi
+
+            # 验证 glxinfo
+            if sudo test -f /mnt/rootfs/usr/bin/glxinfo; then
+              echo "  glxinfo installed (for GPU verification)"
+            fi
+
+            # 更新 ld.so 缓存 (通过 chroot + qemu, 或手动创建符号链接)
+            echo "  Updating library links..."
+            # 尝试多种方式运行 ldconfig (qemu-user-static 已安装)
+            LDCONFIG_OK=false
+            # 方式1: 直接 ldconfig
+            if sudo chroot /mnt/rootfs /sbin/ldconfig 2>/dev/null; then
+              echo "  ldconfig via chroot succeeded"
+              LDCONFIG_OK=true
+            # 方式2: 通过 bash 调用
+            elif sudo chroot /mnt/rootfs /bin/bash -c "ldconfig" 2>/dev/null; then
+              echo "  ldconfig via bash succeeded"
+              LDCONFIG_OK=true
+            fi
+            # 方式3: 生成 ld.so.conf 并手动创建 ld.so.cache (即使 qemu 不可用)
+            if [ "$LDCONFIG_OK" = "false" ]; then
+              echo "  chroot ldconfig failed, using fallback..."
+              # 确保 ld.so.conf.d 目录存在并包含标准路径
+              sudo mkdir -p /mnt/rootfs/etc/ld.so.conf.d
+              echo "/usr/lib/aarch64-linux-gnu" | sudo tee /mnt/rootfs/etc/ld.so.conf.d/aarch64.conf > /dev/null
+              echo "/usr/local/lib" | sudo tee -a /mnt/rootfs/etc/ld.so.conf.d/aarch64.conf > /dev/null
+              # 确保 ld.so.conf 包含 ld.so.conf.d
+              if ! sudo grep -q "ld.so.conf.d" /mnt/rootfs/etc/ld.so.conf 2>/dev/null; then
+                echo "include /etc/ld.so.conf.d/*.conf" | sudo tee -a /mnt/rootfs/etc/ld.so.conf > /dev/null
+              fi
+              # gpu-setup.sh 在首次启动时会再次运行 ldconfig 作为保障
+              echo "  Library paths configured, ldconfig will run on first boot"
+            fi
+            # 验证关键库文件存在
+            echo "  Verifying key Mesa libraries..."
+            for lib in libglapi.so libGL.so libEGL.so libGLESv2.so libgbm.so libdrm.so; do
+              FOUND=$(sudo find /mnt/rootfs/usr/lib -name "${lib}*" 2>/dev/null | head -1)
+              if [ -n "$FOUND" ]; then
+                echo "    OK: $lib -> $(echo $FOUND | sed 's|/mnt/rootfs||')"
+              else
+                echo "    MISSING: $lib"
+              fi
+            done
+          else
+            echo "  WARNING: No Mesa packages downloaded, GPU acceleration will be unavailable"
+            echo "  Users can install manually: apt install libgl1-mesa-dri mesa-utils"
+          fi
+
+          cd $GITHUB_WORKSPACE
+          # 清理 apt arm64 源 (避免影响后续步骤)
+          sudo rm -f /etc/apt/sources.list.d/arm64-ports.list
+          sudo dpkg --remove-architecture arm64 2>/dev/null || true
+
           # 设置脚本权限
           sudo chmod 755 /mnt/rootfs/usr/local/bin/fix-gxl-eth.sh 2>/dev/null
           sudo chmod 755 /mnt/rootfs/usr/local/bin/eth-monitor.sh 2>/dev/null
@@ -898,6 +1046,8 @@ jobs:
           sudo chmod 755 /mnt/rootfs/usr/local/bin/wifi-connect.sh 2>/dev/null
           # V6.1: 系统优化脚本权限
           sudo chmod 755 /mnt/rootfs/usr/local/bin/optimize-system.sh 2>/dev/null
+          # V6.4: GPU 驱动脚本权限
+          sudo chmod 755 /mnt/rootfs/usr/local/bin/gpu-setup.sh 2>/dev/null
 
           # 启用 systemd 服务 (创建符号链接)
           sudo mkdir -p /mnt/rootfs/etc/systemd/system/multi-user.target.wants
@@ -915,6 +1065,9 @@ jobs:
           # V6.1: 系统优化服务
           sudo ln -sf /etc/systemd/system/system-optimization.service \
             /mnt/rootfs/etc/systemd/system/multi-user.target.wants/system-optimization.service
+          # V6.4: GPU 驱动加载服务
+          sudo ln -sf /etc/systemd/system/gpu-setup.service \
+            /mnt/rootfs/etc/systemd/system/multi-user.target.wants/gpu-setup.service
           echo "Systemd services enabled"
 
           # 优化 fstab (ophub 通常已优化, 仅在未优化时处理)
@@ -953,6 +1106,11 @@ jobs:
           sudo ls -la /mnt/rootfs/usr/local/bin/optimize-system.sh || echo "MISSING: optimize-system.sh"
           sudo ls -la /mnt/rootfs/etc/systemd/system/system-optimization.service || echo "MISSING: system-optimization.service"
           sudo ls -la /mnt/rootfs/etc/logrotate.d/b860av21-scripts || echo "MISSING: logrotate config"
+          # V6.4: GPU 文件验证
+          sudo ls -la /mnt/rootfs/usr/local/bin/gpu-setup.sh || echo "MISSING: gpu-setup.sh"
+          sudo ls -la /mnt/rootfs/etc/systemd/system/gpu-setup.service || echo "MISSING: gpu-setup.service"
+          sudo ls -la /mnt/rootfs/etc/modules-load.d/lima.conf || echo "MISSING: lima.conf"
+          sudo ls -la /mnt/rootfs/usr/lib/aarch64-linux-gnu/dri/lima_dri.so 2>/dev/null || echo "MISSING: lima_dri.so (Mesa)"
           sudo ls -la /mnt/rootfs/etc/systemd/system/multi-user.target.wants/
 
           # 同步并卸载 (关键操作: 失败则退出)
@@ -1060,155 +1218,62 @@ jobs:
 
           IMAGE_NAME="${{ steps.pack.outputs.image_name }}"
           BUILD_DATE="${{ steps.pack.outputs.build_date }}"
-          TAG="v6.3.${BUILD_DATE}-${OPHUB_SOC}-$(echo $GITHUB_SHA | cut -c1-7)"
+          TAG="v6.4.${BUILD_DATE}-${OPHUB_SOC}-$(echo $GITHUB_SHA | cut -c1-7)"
           echo "Creating release: $TAG"
           echo "Image name: $IMAGE_NAME"
 
           # 获取 rootfs UUID
           ROOT_UUID=$(sudo dumpe2fs -h system.PARTITION 2>&1 | grep -oP 'UUID:\s+\K[a-f0-9-]+' || echo "unknown")
 
-          # 生成 release notes 文件
+          # 生成 release notes 文件 (精简版)
           cat > /tmp/release-notes.md << 'RNOTES'
-          ## B860AV2.1-A Armbian 线刷镜像 V6.3
+          ## B860AV2.1-A Armbian 线刷镜像 V6.4
 
-          ### V6.3 改进 (内核来源回退 + 6.1.177 升级)
-          - ophub 主仓库已移除 6.1.y 内核镜像, V6.3 自动回退到仓库 Release kernel-6.1-archive 存档
-          - 存档镜像 6.1.150 下载后, 自动用 deb-6.1.177 升级内核到最新 6.1.y LTS
-          - 内核升级内容: vmlinuz + uInitrd + DTB + 内核模块全部替换
-          - 内核 deb 来源: ophub/kernel 官方仓库 (kernel_stable release)
-          - 存档位置: Release "kernel-6.1-archive" (deb-6.1.177.tar.gz + 完整镜像)
-          - 智能回退: ophub 恢复 6.1.y 时自动使用 ophub 源, 无需修改工作流
+          **内核 6.1.177 LTS · GPU 加速 · WiFi 内置 · eMMC 定制 · U-Boot Logo**
 
-          ### V6.2 改进 (U-Boot 启动 Logo — 消除黑屏)
-          - U-Boot 阶段显示静态 BMP Logo (1280x720, 24-bit, ~2.6MB), 覆盖内核启动 + rootfs 扩容期间的黑屏
-          - 编译 U-Boot 时启用 VIDEO + VIDEO_MESON + CMD_BMP 配置 (p212_defconfig 默认不含视频支持)
-          - 自定义 boot.scr 引导脚本, 在加载内核前执行 `bmp display` 显示 Logo
-          - Logo 文件存放于 boot 分区根目录 (logo.bmp), 由 CI 自动验证和转换格式
-          - CI 自动检测 assets/logo.bmp: 格式不正确时自动转换为 U-Boot 兼容 BMP (BMP3, 无压缩, 1280x720)
-          - boot.scr 使用 :${distro_bootpart} 指定分区 (修复 bootmeth_script 加载路径)
-          - boot.scr 添加 bootargs 回退 (uEnv.txt 加载失败时使用默认参数, 避免空 bootargs)
-          - 异常处理: logo.bmp 不存在时跳过 Logo 注入, 回退到 extlinux.conf 引导 (不中断构建)
-          - U-Boot 不支持 BMP 显示时: boot.scr 中 `if load ... logo.bmp` 失败, 跳过 Logo 继续启动
+          ### 主要特性
+          - **GPU 加速**: Mali-450 lima 开源驱动 + Mesa 用户空间驱动 (OpenGL ES 2.0)
+          - **内核**: 6.1.177 LTS (锁定, ophub stable config-6.1, lima 模块已启用)
+          - **WiFi**: SSV6051/UWE5622/MT7601U 固件内置, 一键连接助手 `wifi-connect.sh`
+          - **eMMC**: 定制 DTB 降至 50MHz (适配国产 eMMC), 含 3 个备选 DTB
+          - **网络**: GXL 以太网 PHY 修复 + 链路监控 + MAC 设置
+          - **系统**: zram swap + CPU 调频 + tmpfs + eMMC 写入保护
+          - **启动**: U-Boot BMP Logo 消除黑屏 + 首启自动验证修复
 
-          ### V6.1 改进 (内核锁定 6.1.y LTS + 版本号带日期 + 系统优化)
-          - 锁定内核版本为 6.1.y LTS (通过 ophub 镜像文件名过滤)
-          - Release 标签格式: v6.1.YYYYMMDD-SoC-SHA (如 v6.1.20260723-s905l3b-abc1234)
-          - 修复内核版本过滤逻辑: 精确匹配文件名中的 6.1.x 版本号
-          - 回退机制: 若指定内核版本镜像不存在, 自动回退到最新可用版本
-          - 系统优化脚本 (optimize-system.sh): zram swap + CPU 调频 + tmpfs + eMMC 写入保护
-          - zram swap: 内存 50% 大小, lz4 压缩, 减少 eMMC 写入
-          - CPU 调频: ondemand/schedutil, up_threshold=50% (平衡性能与功耗)
-          - tmpfs /tmp: 256MB, 减少 eMMC 写入磨损
-          - eMMC 写入保护: dirty_ratio 优化 + journald volatile 存储 + logrotate 日志轮转
-          - fix-gxl-eth.sh 回退优先 full-duplex (吞吐量翻倍), half-duplex 兜底
-          - first-boot-check.sh 动态检测分区设备 (不再硬编码 /dev/mmcblk0p1/p2)
-
-          ### V6 改进 (WiFi 内置适配 — 已包含)
-          - 内置 SSV6051/SV6256P WiFi 固件 (硅谷数模, B860AV2.1 固件 ssv_dump_flash 服务对应)
-          - 固件路径: /lib/firmware/ 和 /lib/firmware/ssv6051/ (兼容不同驱动版本)
-          - UWE5622 固件已由 ophub 默认包含 (紫光展锐, unisoc_wpa_s 服务对应)
-          - MT7601U 固件已由 ophub 默认包含 (联发科, zte-7601-cp 服务对应)
-          - WiFi 自动检测脚本 (wifi-setup.sh): 开机自动加载驱动 + 检测接口 + 配置 NetworkManager
-          - WiFi 连接助手 (wifi-connect.sh): 一键扫描/连接/断开 WiFi 网络
-          - WiFi systemd 服务 (wifi-setup.service): 开机自动执行, 不影响启动速度
-          - NetworkManager WiFi 配置: 禁用 MAC 随机化 + 禁用省电模式 (提升稳定性)
-          - 支持 30+ 种 WiFi 驱动自动探测 (主线 + 树外驱动)
-          - NW (无 WiFi) 版本自动跳过, 不产生错误
-          - 锁定内核 6.1.y LTS (ophub 官方默认, S905L3-B 兼容性最佳, 社区 Issue 最多)
-          - 避免使用 6.12.y (HDMI 崩溃/网卡缺失) 和 6.18.y (GPU SError)
-
-          ### WiFi 使用方法
-          ```
-          # 扫描 WiFi 网络
-          wifi-connect.sh scan
-
-          # 连接 WiFi (WPA/WPA2)
-          wifi-connect.sh "你的WiFi名" "你的密码"
-
-          # 连接开放网络 (无密码)
-          wifi-connect.sh "你的WiFi名"
-
-          # 查看连接状态
-          wifi-connect.sh status
-
-          # 断开连接
-          wifi-connect.sh disconnect
-
-          # 或者使用交互式工具
-          nmtui
-          ```
-
-          ### V5 改进 (DTB eMMC 时序修复 — 已包含)
-          - 创建 B860AV2.1-A 专用 DTB (`meson-gxl-s905l3b-b860av21.dtb`)
-          - eMMC max-frequency 从 200MHz 降到 50MHz (适配 mafId=0xD6 二线/国产 eMMC)
-          - 移除 mmc-hs200-1_8v 和 mmc-ddr-1_8v (HS200 tuning 裕量差导致首启失败)
-          - 保留 cap-mmc-highspeed (52MHz SDR, 几乎所有 eMMC 5.0+ 都支持)
-          - 默认 DTB 切换为定制版本, e900v22e 作为备选保留在镜像中
-          - 同时保留 m302a 和 p212 DTB 供手动切换
-
-          ### V4 改进 (已包含)
-          - 内核 cmdline 添加 `clk_ignore_unused` (防止 GXL 耦合时钟关闭导致 reset)
-          - 内核 cmdline 添加 `earlycon` (早期控制台输出, 辅助调试)
-          - boot.ini 修正 `initrd_addr=0x15000000` (防止 initramfs 与内核镜像重叠)
-          - tune2fs 优化: 禁用 `metadata_csum` + `journal_data_writeback` + 禁用定期 fsck
-          - 添加 first-boot-check.service (首启自动验证 UUID/网络/eMMC/服务状态)
-          - U-Boot env offset 检查 (确认 CONFIG_ENV_IS_NOWHERE, 无 env 偏移冲突)
-          - 修复 boot 配置文件 UUID 不匹配问题 (ophub uEnv.txt UUID ≠ 实际 ext4 UUID)
-
-          ### V3 改进 (已包含)
-          - DTB 切换为 e900v22e (修复 HDMI 控制器 0d0d:0d:0d 问题)
-          - GXL PHY LPA Corruption 修复脚本 (fix-gxl-eth.service)
-          - 以太网链路持续监控 (eth-monitor.service)
-          - MAC 地址设置脚本 (mac-setup.service)
-          - 网络性能优化 sysctl 配置
-          - fstab 优化: noatime + commit=600
-
-          ### DTB 切换指南
-          镜像中包含以下 DTB, 如默认 DTB 无法启动可手动切换:
-          1. `meson-gxl-s905l3b-b860av21.dtb` — V5 定制 (eMMC 50MHz, 默认)
-          2. `meson-gxl-s905l3b-e900v22e.dtb` — ophub 通用 (eMMC 200MHz+HS200)
-          3. `meson-gxl-s905l3b-m302a.dtb` — M302A 主板备选
-          4. `meson-gxl-s905x-p212.dtb` — P212 参考板基础
-
-          切换方法: 编辑 boot 分区的 uEnv.txt 中的 FDT 行 (boot.scr 会读取 uEnv.txt)
-
-          ### 文件说明
-          | 文件 | 说明 |
-          |------|------|
-          | b860av21-armbian-burn-v6.3.YYYYMMDD-s905l3b.img.gz | 完整线刷镜像 (USB Burning Tool) |
-          | boot.fat32.gz | boot 分区 (手动 dd 用) |
-          | rootfs.ext4.gz | rootfs 分区 (手动 dd 用) |
-          | bootloader.PARTITION | FIP bootloader (原厂BL + 主线U-Boot) |
-
-          ### 使用方法 (重要!)
-          1. 下载 b860av21-armbian-burn-v6.2.YYYYMMDD-s905l3b.img.gz 并 gunzip 解压
-          2. 打开 Amlogic USB Burning Tool v2.1.6
-          3. 导入解压后的 .img 文件
-          4. **必须勾选以下选项**:
-             - Erase Flash (全盘擦除, 清除旧固件残留)
-             - Verify Flash (写入后 CRC 校验, 防止假成功)
-          5. **不要勾选**:
-             - Preserve User Data (保留旧数据会导致分区冲突)
-          6. 点击 Start, 连接 OTG 口线刷
-          7. 等待显示 100% 绿色成功
+          ### 线刷方法
+          1. 下载 `.img.gz` 并 `gunzip` 解压
+          2. Amlogic USB Burning Tool v2.1.6 导入 `.img`
+          3. **勾选** Erase Flash + Verify Flash, **不勾** Preserve User Data
+          4. 点 Start, OTG 口线刷, 等待 100% 绿色
 
           ### 启动后验证
-          首次启动后, 检查 eMMC 实际速度模式:
           ```
+          # GPU 驱动状态
+          cat /var/log/gpu-setup.log
+          lsmod | grep lima && ls /dev/dri/
+
+          # WiFi 连接
+          wifi-connect.sh "WiFi名" "密码"
+
+          # eMMC 速度
           cat /sys/kernel/debug/mmc*/ios 2>/dev/null | grep -E "timing|clock"
-          mmc extcsd read /dev/mmcblk0 2>/dev/null | grep HS_TIMING
           ```
-          如果稳定运行, 可尝试手动升回 DDR52 (52MHz DDR, 104MB/s):
-          修改 DTB 添加 `mmc-ddr-1_8v`, max-frequency 改为 52000000
+
+          ### DTB 切换
+          编辑 boot 分区 `uEnv.txt` 中的 FDT 行:
+          - `meson-gxl-s905l3b-b860av21.dtb` — 定制 50MHz (默认)
+          - `meson-gxl-s905l3b-e900v22e.dtb` — ophub 通用 200MHz
+          - `meson-gxl-s905l3b-m302a.dtb` — M302A 备选
           RNOTES
 
           echo "" >> /tmp/release-notes.md
           echo "### 构建信息" >> /tmp/release-notes.md
           echo "- 构建时间: $(date -u '+%Y-%m-%d %H:%M UTC')" >> /tmp/release-notes.md
-          echo "- 版本: V6.2 (内核 6.1.y LTS + WiFi + 定制 DTB + eMMC 50MHz + 系统优化 + U-Boot Logo)" >> /tmp/release-notes.md
+          echo "- 版本: V6.4 (内核 6.1.y LTS + WiFi + 定制 DTB + eMMC 50MHz + 系统优化 + U-Boot Logo + GPU 加速)" >> /tmp/release-notes.md
           echo "- U-Boot: ${UBOOT_VERSION} (主线, p212_defconfig)" >> /tmp/release-notes.md
           echo "- ophub SoC: ${OPHUB_SOC}" >> /tmp/release-notes.md
           echo "- 内核版本: ${KERNEL_VERSION}.y (LTS, 锁定)" >> /tmp/release-notes.md
+          echo "- GPU: Mali-450 + lima 驱动 (CONFIG_DRM_LIMA=m) + Mesa 用户空间驱动" >> /tmp/release-notes.md
           echo "- 默认 DTB: meson-gxl-s905l3b-b860av21.dtb (eMMC 50MHz)" >> /tmp/release-notes.md
           echo "- WiFi 固件: SSV6051 (内置) + UWE5622 (ophub内置) + MT7601U (ophub内置)" >> /tmp/release-notes.md
           echo "- Root UUID: ${ROOT_UUID}" >> /tmp/release-notes.md
@@ -1216,7 +1281,7 @@ jobs:
           echo "- 镜像名称: $IMAGE_NAME.img.gz" >> /tmp/release-notes.md
 
           gh release create "$TAG" \
-            --title "B860AV2.1-A Armbian V6.2 $(date +%Y-%m-%d)" \
+            --title "B860AV2.1-A Armbian V6.4 $(date +%Y-%m-%d)" \
             --notes-file /tmp/release-notes.md \
             artifacts/${IMAGE_NAME}.img.gz \
             artifacts/boot.fat32.gz \
