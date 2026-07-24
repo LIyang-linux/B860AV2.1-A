@@ -1,19 +1,21 @@
-# B860AV2.1-A Armbian 线刷镜像 - 全自动构建工作流 (V6.2)
+# B860AV2.1-A Armbian 线刷镜像 - 全自动构建工作流 (V6.3)
 #
 # 功能：
 #   1. 编译主线 U-Boot v2025.04 (p212_defconfig, GXL)
 #   2. 从原厂 fip_backup.img 提取 BL2/BL30/BL31 + 原厂 DDR.USB/UBOOT.USB
 #   3. 用 gxlimg 重新打包 FIP (原厂 BL + 主线 U-Boot)
-#   4. 下载 ophub S905L3-B Armbian 镜像
+#   4. 下载 ophub S905L3-B Armbian 镜像 (V6.3: 6.1.y 回退到仓库 Release 存档)
 #   5. 提取 boot 分区 (内核 + DTB + initramfs + 引导脚本)
 #   6. 创建 64MB FAT32 boot.PARTITION (V3: e900v22e DTB; V6.2: logo 压缩至 2.6MB 以适配)
-#   7. 提取并缩小 rootfs ext4 为 system.PARTITION
-#   8. V3-V5: 注入网络可靠性脚本 + UUID修复 + tune2fs优化 + 首启检查 + DTB定制
-#   9. V6: 内置 WiFi 固件 (SSV6051) + WiFi 自动检测脚本 + 连接助手
-#  10. V6.1: 锁定内核 6.1.y LTS + 版本号带日期标签
-#  11. V6.2: U-Boot 启动 Logo (BMP) 消除黑屏 + boot.scr 引导脚本
-#  12. 打包完整 Amlogic 线刷镜像 (bootloader + boot + rootfs)
-#  13. 上传 Artifact 和 Release
+#   7. V6.3: 内核升级 — 用 deb-6.1.177 替换镜像内核为最新 6.1.y LTS
+#   8. 提取并缩小 rootfs ext4 为 system.PARTITION
+#   9. V3-V5: 注入网络可靠性脚本 + UUID修复 + tune2fs优化 + 首启检查 + DTB定制
+#  10. V6: 内置 WiFi 固件 (SSV6051) + WiFi 自动检测脚本 + 连接助手
+#  11. V6.1: 锁定内核 6.1.y LTS + 版本号带日期标签
+#  12. V6.2: U-Boot 启动 Logo (BMP) 消除黑屏 + boot.scr 引导脚本
+#  13. V6.3: 内核来源回退 (ophub 已移除 6.1.y, 改用仓库 Release 存档 + deb 包升级)
+#  14. 打包完整 Amlogic 线刷镜像 (bootloader + boot + rootfs)
+#  15. 上传 Artifact 和 Release
 #
 # 使用方法：
 #   方式 1 (手动触发): Actions → Build Armbian Burn Image → Run workflow
@@ -72,7 +74,7 @@ env:
   UBOOT_VERSION: ${{ github.event.inputs.uboot_version || 'v2025.04' }}
   OPHUB_SOC: ${{ github.event.inputs.ophub_soc || 's905l3b' }}
   KERNEL_VERSION: ${{ github.event.inputs.kernel_version || '6.1' }}
-  BUILD_VERSION: 'v6.2'
+  BUILD_VERSION: 'v6.3'
 
 jobs:
   build:
@@ -316,6 +318,7 @@ jobs:
         run: |
           if [ -n "${{ github.event.inputs.ophub_image_url }}" ]; then
             echo "url=${{ github.event.inputs.ophub_image_url }}" >> $GITHUB_OUTPUT
+            echo "kernel_source=user" >> $GITHUB_OUTPUT
             echo "Using user-specified URL"
           else
             echo "Finding latest ophub ${OPHUB_SOC} image with kernel ${KERNEL_VERSION}..."
@@ -354,15 +357,53 @@ jobs:
                           sys.exit(0)
           print('')
           ")
-            if [ -z "$URL" ]; then
+            if [ -n "$URL" ]; then
+              # 检查找到的镜像内核版本
+              FILENAME=$(basename "$URL")
+              IMG_KERNEL=$(echo "$FILENAME" | grep -oP '\d+\.\d+\.\d+(?=_server)' | head -1 || echo "unknown")
+              echo "Found ophub image: $FILENAME (kernel: $IMG_KERNEL)"
+              if [ "${KERNEL_VERSION}" = "6.1" ] && ! echo "$IMG_KERNEL" | grep -qP '^6\.1\.'; then
+                echo "WARNING: ophub no longer provides 6.1.y kernel (found $IMG_KERNEL)"
+                echo "V6.3: Falling back to archived 6.1.y image from repo Release..."
+                # V6.3: ophub 已移除 6.1.y 镜像, 回退到仓库 Release kernel-6.1-archive 存档
+                ARCHIVE_URL="https://github.com/${{ github.repository }}/releases/download/kernel-6.1-archive/armbian-6.1.150-s905l3b-jammy.img.gz"
+                # 验证存档可下载
+                HTTP_CODE=$(curl -sL -o /dev/null -w "%{http_code}" --max-time 15 "$ARCHIVE_URL")
+                if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "302" ]; then
+                  echo "  Archived 6.1.150 image available (HTTP $HTTP_CODE)"
+                  echo "url=$ARCHIVE_URL" >> $GITHUB_OUTPUT
+                  echo "kernel_source=archive-6.1.150" >> $GITHUB_OUTPUT
+                  echo "image_kernel=6.1.150" >> $GITHUB_OUTPUT
+                  echo "Using archived 6.1.150 image (will upgrade to 6.1.177 via deb)"
+                  exit 0
+                else
+                  echo "  ERROR: Archive not accessible (HTTP $HTTP_CODE), using ophub fallback"
+                  echo "url=$URL" >> $GITHUB_OUTPUT
+                  echo "kernel_source=ophub-fallback" >> $GITHUB_OUTPUT
+                  echo "image_kernel=$IMG_KERNEL" >> $GITHUB_OUTPUT
+                  exit 0
+                fi
+              else
+                echo "url=$URL" >> $GITHUB_OUTPUT
+                echo "kernel_source=ophub" >> $GITHUB_OUTPUT
+                echo "image_kernel=$IMG_KERNEL" >> $GITHUB_OUTPUT
+                echo "Image filename: $FILENAME"
+              fi
+            else
               echo "ERROR: No ophub ${OPHUB_SOC} image found (kernel=${KERNEL_VERSION})"
-              exit 1
+              echo "V6.3: Trying archived 6.1.y image from repo Release..."
+              ARCHIVE_URL="https://github.com/${{ github.repository }}/releases/download/kernel-6.1-archive/armbian-6.1.150-s905l3b-jammy.img.gz"
+              HTTP_CODE=$(curl -sL -o /dev/null -w "%{http_code}" --max-time 15 "$ARCHIVE_URL")
+              if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "302" ]; then
+                echo "  Archived 6.1.150 image available"
+                echo "url=$ARCHIVE_URL" >> $GITHUB_OUTPUT
+                echo "kernel_source=archive-6.1.150" >> $GITHUB_OUTPUT
+                echo "image_kernel=6.1.150" >> $GITHUB_OUTPUT
+              else
+                echo "ERROR: No image available from any source!"
+                exit 1
+              fi
             fi
-            echo "url=$URL" >> $GITHUB_OUTPUT
-            echo "Found: $URL"
-            # 提取内核版本号显示
-            FILENAME=$(basename "$URL")
-            echo "Image filename: $FILENAME"
           fi
 
       - name: Download ophub Armbian image
@@ -403,6 +444,112 @@ jobs:
 
           echo "=== Boot files ==="
           find ophub-boot-files -type f | sort
+
+      # ========== V6.3: 内核升级 (6.1.150 → 6.1.177) ==========
+      - name: Upgrade kernel to 6.1.177 via deb package
+        id: kernel_upgrade
+        run: |
+          set -e
+          KERNEL_SOURCE="${{ steps.ophub_url.outputs.kernel_source }}"
+          IMG_KERNEL="${{ steps.ophub_url.outputs.image_kernel }}"
+          echo "=== Kernel source: $KERNEL_SOURCE (image kernel: $IMG_KERNEL) ==="
+
+          # V6.3: 如果使用存档 6.1.150 镜像, 用 deb-6.1.177 升级内核
+          # 如果 ophub 直接提供了 6.1.y, 跳过升级
+          if echo "$IMG_KERNEL" | grep -qP '^6\.1\.'; then
+            echo "Image already has 6.1.y kernel ($IMG_KERNEL)"
+            # 检查是否需要升级到 6.1.177
+            IMG_PATCH=$(echo "$IMG_KERNEL" | cut -d. -f3)
+            if [ "$IMG_PATCH" -ge 177 ]; then
+              echo "Kernel already at 6.1.177+, skipping upgrade"
+              echo "upgraded=false" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+            echo "Upgrading 6.1.$IMG_PATCH → 6.1.177..."
+          else
+            echo "Image has non-6.1 kernel ($IMG_KERNEL), upgrading to 6.1.177..."
+          fi
+
+          # 下载 deb-6.1.177.tar.gz 从仓库 Release kernel-6.1-archive
+          DEB_URL="https://github.com/${{ github.repository }}/releases/download/kernel-6.1-archive/deb-6.1.177.tar.gz"
+          echo "Downloading kernel deb package..."
+          wget -q --timeout=120 -O /tmp/deb-6.1.177.tar.gz "$DEB_URL" || \
+          wget -q --timeout=120 -O /tmp/deb-6.1.177.tar.gz "https://mirror.ghproxy.com/$DEB_URL" || \
+          wget -q --timeout=120 -O /tmp/deb-6.1.177.tar.gz "https://gh-proxy.com/$DEB_URL"
+
+          if [ ! -s /tmp/deb-6.1.177.tar.gz ]; then
+            echo "ERROR: Failed to download deb-6.1.177.tar.gz"
+            echo "upgraded=false" >> $GITHUB_OUTPUT
+            exit 0  # 不中断构建, 使用镜像原始内核
+          fi
+          echo "Downloaded: $(ls -lh /tmp/deb-6.1.177.tar.gz | awk '{print $5}')"
+
+          # 解压 deb 包
+          mkdir -p /tmp/kernel-deb
+          tar xzf /tmp/deb-6.1.177.tar.gz -C /tmp/kernel-deb
+          echo "=== Deb package contents ==="
+          ls -la /tmp/kernel-deb/deb-6.1.177/
+
+          # 提取 linux-image deb → vmlinuz + uInitrd + 内核模块
+          mkdir -p /tmp/img-extract
+          cd /tmp/img-extract
+          ar x /tmp/kernel-deb/deb-6.1.177/linux-image_6.1.177-1-ophub_arm64.deb
+          tar xf data.tar.xz
+          echo "=== Kernel image files ==="
+          ls -lh boot/vmlinuz-* boot/uInitrd-* 2>/dev/null
+
+          # 提取 dtb-meson64 deb → Amlogic DTB
+          mkdir -p /tmp/dtb-extract
+          cd /tmp/dtb-extract
+          ar x /tmp/kernel-deb/deb-6.1.177/linux-dtb-meson64_6.1.177-1-ophub_arm64.deb
+          tar xf data.tar.xz
+          echo "=== DTB files (s905l3b) ==="
+          find boot/dtb/amlogic -name "*s905l3b*" -o -name "*s905l2*" -o -name "*p212*" | sort
+
+          cd $GITHUB_WORKSPACE
+
+          # 替换 boot 文件 (vmlinuz → zImage, uInitrd)
+          echo "=== Replacing kernel in boot files ==="
+          # 找到 vmlinuz 和 uInitrd 文件名
+          VMLINUZ=$(ls /tmp/img-extract/boot/vmlinuz-* 2>/dev/null | head -1)
+          UINITRD=$(ls /tmp/img-extract/boot/uInitrd-* 2>/dev/null | head -1)
+
+          if [ -n "$VMLINUZ" ] && [ -f "$VMLINUZ" ]; then
+            cp "$VMLINUZ" ophub-boot-files/zImage
+            echo "  Replaced zImage with $(basename $VMLINUZ) ($(ls -lh ophub-boot-files/zImage | awk '{print $5}'))"
+          else
+            echo "  WARNING: vmlinuz not found in deb, keeping original zImage"
+          fi
+
+          if [ -n "$UINITRD" ] && [ -f "$UINITRD" ]; then
+            cp "$UINITRD" ophub-boot-files/uInitrd
+            echo "  Replaced uInitrd with $(basename $UINITRD) ($(ls -lh ophub-boot-files/uInitrd | awk '{print $5}'))"
+          else
+            echo "  WARNING: uInitrd not found in deb, keeping original uInitrd"
+          fi
+
+          # 替换 DTB 文件
+          echo "=== Replacing DTB files ==="
+          DTB_SRC="/tmp/dtb-extract/boot/dtb/amlogic"
+          for dtb in meson-gxl-s905l3b-e900v22e.dtb meson-gxl-s905l3b-m302a.dtb \
+                     meson-gxl-s905l3a.dtb meson-gxl-s905l3.dtb meson-gxl-s905l3b.dtb \
+                     meson-gxl-s905l2.dtb meson-gxl-s905x-p212.dtb; do
+            if [ -f "$DTB_SRC/$dtb" ]; then
+              cp "$DTB_SRC/$dtb" "ophub-boot-files/dtb/amlogic/$dtb"
+              echo "  Updated: $dtb"
+            fi
+          done
+
+          # 保存内核模块路径 (供 rootfs 注入步骤使用)
+          MODULES_DIR="/tmp/img-extract/usr/lib/modules/6.1.177-ophub"
+          if [ -d "$MODULES_DIR" ]; then
+            echo "modules_dir=$MODULES_DIR" >> $GITHUB_OUTPUT
+            echo "  Kernel modules: $(find $MODULES_DIR -name '*.ko' | wc -l) .ko files"
+          fi
+
+          echo "upgraded=true" >> $GITHUB_OUTPUT
+          echo "final_kernel=6.1.177" >> $GITHUB_OUTPUT
+          echo "=== Kernel upgrade to 6.1.177 complete ==="
 
       # ========== 创建 boot.PARTITION (64MB FAT32) ==========
       - name: Create boot.PARTITION (FAT32, 64MB)
@@ -515,11 +662,13 @@ jobs:
             mcopy -i boot.PARTITION assets/logo.bmp ::logo.bmp
             echo "  logo.bmp copied to boot partition"
             # 用 printf 生成 boot.cmd (避免 heredoc 在 YAML 中的缩进问题)
+            # V6.2 fix: 移除 ODROIDN2-UBOOT-CONFIG (Odroid 专有, 主线 U-Boot 会报 Unknown command)
             # V6.2 fix: 移除 osd/open/clear (主线 U-Boot 无此命令)
             # V6.2 fix: 移除 outputmode/hdmimode (Amlogic 厂商 U-Boot 专有变量)
-            # 主线 U-Boot DM Video 会自动通过 HDMI EDID 初始化显示输出
+            # V6.2 fix: 添加 :${distro_bootpart} 到 load 命令 (bootmeth_script 设置的分区号)
+            # V6.2 fix: 添加 bootargs 回退 (uEnv.txt 加载失败时使用默认参数)
+            # 主线 U-Boot DM Video (VIDEO_MESON) 会自动通过 HDMI EDID 初始化显示输出
             printf '%s\n' \
-              'ODROIDN2-UBOOT-CONFIG' \
               'setenv env_addr 0x10400000' \
               'setenv kernel_addr 0x11000000' \
               'setenv initrd_addr 0x15000000' \
@@ -527,17 +676,23 @@ jobs:
               'setenv logo_addr 0x20000000' \
               'if test "${devtype}" = ""; then setenv devtype "mmc"; fi' \
               'if test "${devnum}" = ""; then setenv devnum 0; fi' \
-              'if load ${devtype} ${devnum} ${logo_addr} logo.bmp; then' \
+              'if test "${distro_bootpart}" = ""; then setenv distro_bootpart 1; fi' \
+              'if load ${devtype} ${devnum}:${distro_bootpart} ${logo_addr} logo.bmp; then' \
               '  bmp display ${logo_addr} 0 0' \
               '  echo "Boot logo displayed"' \
               'else' \
               '  echo "WARNING: logo.bmp not found, continuing without logo"' \
               'fi' \
-              'load ${devtype} ${devnum} ${env_addr} uEnv.txt && env import -t ${env_addr} ${filesize}' \
-              'setenv bootargs ${APPEND}' \
-              'load ${devtype} ${devnum} ${kernel_addr} ${LINUX}' \
-              'load ${devtype} ${devnum} ${initrd_addr} ${INITRD}' \
-              'load ${devtype} ${devnum} ${dtb_addr} ${FDT}' \
+              'if load ${devtype} ${devnum}:${distro_bootpart} ${env_addr} uEnv.txt; then' \
+              '  env import -t ${env_addr} ${filesize}' \
+              '  setenv bootargs ${APPEND}' \
+              'else' \
+              '  echo "ERROR: uEnv.txt not found, using fallback bootargs"' \
+              '  setenv bootargs "root=/dev/mmcblk0p2 rootflags=data=writeback rw rootwait rootfstype=ext4 console=ttyAML0,115200n8 console=tty0 no_console_suspend consoleblank=0 clk_ignore_unused earlycon net.ifnames=0 loglevel=1"' \
+              'fi' \
+              'load ${devtype} ${devnum}:${distro_bootpart} ${kernel_addr} ${LINUX}' \
+              'load ${devtype} ${devnum}:${distro_bootpart} ${initrd_addr} ${INITRD}' \
+              'load ${devtype} ${devnum}:${distro_bootpart} ${dtb_addr} ${FDT}' \
               'fdt addr ${dtb_addr}' \
               'booti ${kernel_addr} ${initrd_addr} ${dtb_addr}' \
               > /tmp/boot.cmd
@@ -681,6 +836,31 @@ jobs:
             exit 1
           fi
           echo "Rootfs mounted successfully"
+
+          # V6.3: 替换 rootfs 中的内核模块 (6.1.150 → 6.1.177)
+          KERNEL_UPGRADED="${{ steps.kernel_upgrade.outputs.upgraded }}"
+          MODULES_DIR="${{ steps.kernel_upgrade.outputs.modules_dir }}"
+          if [ "$KERNEL_UPGRADED" = "true" ] && [ -n "$MODULES_DIR" ] && [ -d "$MODULES_DIR" ]; then
+            echo "=== V6.3: Replacing kernel modules in rootfs ==="
+            # 删除旧内核模块 (6.1.150 或其他版本)
+            sudo rm -rf /mnt/rootfs/usr/lib/modules/6.1.150-ophub 2>/dev/null || true
+            sudo rm -rf /mnt/rootfs/usr/lib/modules/6.1.149-ophub 2>/dev/null || true
+            sudo rm -rf /mnt/rootfs/usr/lib/modules/6.12.* 2>/dev/null || true
+            sudo rm -rf /mnt/rootfs/usr/lib/modules/6.18.* 2>/dev/null || true
+            # 复制新内核模块
+            sudo mkdir -p /mnt/rootfs/usr/lib/modules/
+            sudo cp -a "$MODULES_DIR" /mnt/rootfs/usr/lib/modules/
+            echo "  Installed modules: 6.1.177-ophub"
+            echo "  Module count: $(find /mnt/rootfs/usr/lib/modules/6.1.177-ophub -name '*.ko' | wc -l)"
+            # 创建 modules.dep
+            if [ -f /mnt/rootfs/usr/lib/modules/6.1.177-ophub/modules.dep ]; then
+              echo "  modules.dep already present"
+            else
+              echo "  WARNING: modules.dep not found, depmod will run on first boot"
+            fi
+          else
+            echo "Kernel modules not upgraded (upgraded=$KERNEL_UPGRADED)"
+          fi
 
           # 复制 rootfs-overlay 文件
           if [ -d rootfs-overlay ]; then
@@ -879,7 +1059,7 @@ jobs:
 
           IMAGE_NAME="${{ steps.pack.outputs.image_name }}"
           BUILD_DATE="${{ steps.pack.outputs.build_date }}"
-          TAG="v6.2.${BUILD_DATE}-${OPHUB_SOC}-$(echo $GITHUB_SHA | cut -c1-7)"
+          TAG="v6.3.${BUILD_DATE}-${OPHUB_SOC}-$(echo $GITHUB_SHA | cut -c1-7)"
           echo "Creating release: $TAG"
           echo "Image name: $IMAGE_NAME"
 
@@ -888,16 +1068,26 @@ jobs:
 
           # 生成 release notes 文件
           cat > /tmp/release-notes.md << 'RNOTES'
-          ## B860AV2.1-A Armbian 线刷镜像 V6.2
+          ## B860AV2.1-A Armbian 线刷镜像 V6.3
+
+          ### V6.3 改进 (内核来源回退 + 6.1.177 升级)
+          - ophub 主仓库已移除 6.1.y 内核镜像, V6.3 自动回退到仓库 Release kernel-6.1-archive 存档
+          - 存档镜像 6.1.150 下载后, 自动用 deb-6.1.177 升级内核到最新 6.1.y LTS
+          - 内核升级内容: vmlinuz + uInitrd + DTB + 内核模块全部替换
+          - 内核 deb 来源: ophub/kernel 官方仓库 (kernel_stable release)
+          - 存档位置: Release "kernel-6.1-archive" (deb-6.1.177.tar.gz + 完整镜像)
+          - 智能回退: ophub 恢复 6.1.y 时自动使用 ophub 源, 无需修改工作流
 
           ### V6.2 改进 (U-Boot 启动 Logo — 消除黑屏)
-          - U-Boot 阶段显示静态 BMP Logo (1920x1080, 24-bit), 覆盖内核启动 + rootfs 扩容期间的黑屏
+          - U-Boot 阶段显示静态 BMP Logo (1280x720, 24-bit, ~2.6MB), 覆盖内核启动 + rootfs 扩容期间的黑屏
+          - 编译 U-Boot 时启用 VIDEO + VIDEO_MESON + CMD_BMP 配置 (p212_defconfig 默认不含视频支持)
           - 自定义 boot.scr 引导脚本, 在加载内核前执行 `bmp display` 显示 Logo
           - Logo 文件存放于 boot 分区根目录 (logo.bmp), 由 CI 自动验证和转换格式
-          - CI 自动检测 assets/logo.bmp: 格式不正确时自动转换为 U-Boot 兼容 BMP (BMP3, 无压缩)
+          - CI 自动检测 assets/logo.bmp: 格式不正确时自动转换为 U-Boot 兼容 BMP (BMP3, 无压缩, 1280x720)
+          - boot.scr 使用 :${distro_bootpart} 指定分区 (修复 bootmeth_script 加载路径)
+          - boot.scr 添加 bootargs 回退 (uEnv.txt 加载失败时使用默认参数, 避免空 bootargs)
           - 异常处理: logo.bmp 不存在时跳过 Logo 注入, 回退到 extlinux.conf 引导 (不中断构建)
           - U-Boot 不支持 BMP 显示时: boot.scr 中 `if load ... logo.bmp` 失败, 跳过 Logo 继续启动
-          - 修复 boot.PARTITION 构建步骤中 `if` 语句缺少 `fi` 的语法缺陷
 
           ### V6.1 改进 (内核锁定 6.1.y LTS + 版本号带日期 + 系统优化)
           - 锁定内核版本为 6.1.y LTS (通过 ophub 镜像文件名过滤)
@@ -979,18 +1169,18 @@ jobs:
           3. `meson-gxl-s905l3b-m302a.dtb` — M302A 主板备选
           4. `meson-gxl-s905x-p212.dtb` — P212 参考板基础
 
-          切换方法: 编辑 boot 分区的 extlinux.conf 或 uEnv.txt 中的 fdt/FDT 行
+          切换方法: 编辑 boot 分区的 uEnv.txt 中的 FDT 行 (boot.scr 会读取 uEnv.txt)
 
           ### 文件说明
           | 文件 | 说明 |
           |------|------|
-          | b860av21-armbian-burn-v6.1.YYYYMMDD-s905l3b.img.gz | 完整线刷镜像 (USB Burning Tool) |
+          | b860av21-armbian-burn-v6.3.YYYYMMDD-s905l3b.img.gz | 完整线刷镜像 (USB Burning Tool) |
           | boot.fat32.gz | boot 分区 (手动 dd 用) |
           | rootfs.ext4.gz | rootfs 分区 (手动 dd 用) |
           | bootloader.PARTITION | FIP bootloader (原厂BL + 主线U-Boot) |
 
           ### 使用方法 (重要!)
-          1. 下载 b860av21-armbian-burn-v6.1.YYYYMMDD-s905l3b.img.gz 并 gunzip 解压
+          1. 下载 b860av21-armbian-burn-v6.2.YYYYMMDD-s905l3b.img.gz 并 gunzip 解压
           2. 打开 Amlogic USB Burning Tool v2.1.6
           3. 导入解压后的 .img 文件
           4. **必须勾选以下选项**:

@@ -17,26 +17,28 @@
 | WiFi | NW 版无 WiFi（固件含 SSV6051/UWE5622/MT7601U 驱动） |
 | 救砖方式 | Amlogic USB Burning Tool v2.1.6 |
 
-## 当前版本：V6.1
+## 当前版本：V6.3
 
 | 项目 | 信息 |
 |------|------|
-| 最新构建 | `v6.1.20260723-s905l3b-d88b332` |
-| 构建时间 | 2026-07-23 12:52 UTC |
-| 内核 | Linux 6.1.y LTS（ophub 社区内核，锁定） |
-| U-Boot | v2025.04（主线，p212_defconfig） |
+| 最新构建 | `v6.3.YYYYMMDD-s905l3b` |
+| 内核 | Linux 6.1.177 LTS（ophub/kernel 官方 deb, 仓库 Release 存档） |
+| U-Boot | v2025.04（主线，p212_defconfig + VIDEO_MESON + CMD_BMP） |
 | 默认 DTB | meson-gxl-s905l3b-b860av21.dtb（eMMC 50MHz 定制） |
-| rootfs | Armbian bullseye arm64（ophub server 版） |
-| Root UUID | 8cba1caa-50b0-4645-963e-3c7a6c4dbe55 |
+| rootfs | Armbian jammy arm64（ophub server 版, 6.1.150 基础镜像） |
+| Boot Logo | 1280x720 24-bit BMP（U-Boot 阶段显示，消除黑屏） |
+| 引导方式 | boot.scr（含 Logo 显示）+ uEnv.txt |
 
 ## 项目结构
 
 ```
 B860AV2.1-A/
 ├── .github/workflows/
-│   └── build-armbian-burn.yml          # V6.1 全自动构建工作流
+│   └── build-armbian-burn.yml          # V6.2 全自动构建工作流
 ├── scripts/
 │   └── build-armbian.sh                # 构建辅助脚本
+├── assets/
+│   └── logo.bmp                        # U-Boot 启动 Logo (1280x720 24-bit BMP)
 ├── rootfs-overlay/                      # 注入 rootfs 的自定义文件
 │   ├── etc/
 │   │   ├── NetworkManager/conf.d/       # 以太网 + WiFi 管理配置
@@ -74,6 +76,8 @@ B860AV2.1-A/
 | V5 | 定制 DTB (eMMC 50MHz, 移除 HS200/DDR) 适配国产 eMMC |
 | V6 | WiFi 内置适配 (SSV6051 固件 + 自动检测 + 连接助手) |
 | V6.1 | 内核锁定 6.1.y LTS + 系统优化 (zram/CPU/tmpfs/logrotate) + 网络改进 |
+| V6.2 | U-Boot 启动 Logo (BMP) 消除黑屏 + VIDEO_MESON 视频驱动 + boot.scr 引导脚本 |
+| V6.3 | 内核来源回退 (ophub 移除 6.1.y, 改用仓库 Release 存档) + 内核升级 6.1.177 (deb 包) |
 
 ## 线刷镜像结构
 
@@ -82,17 +86,21 @@ B860AV2.1-A/
 | DDR.USB | 原厂 fip_backup.img | - | DDR4 2GB 初始化 |
 | UBOOT.USB | 原厂 fip_backup.img | - | 原厂 U-Boot（含线刷协议） |
 | bootloader.PARTITION | 原厂 BL2/BL30/BL31 + 主线 U-Boot v2025.04 | bootloader (扇区1) | 混合 FIP |
-| boot.PARTITION | ophub FAT32 64MB | boot 分区 | 内核 + initramfs + DTB |
+| boot.PARTITION | ophub FAT32 64MB | boot 分区 | 内核 + initramfs + DTB + logo.bmp + boot.scr |
 | system.PARTITION | ophub ext4 rootfs | data 分区 | Armbian rootfs + 自定义脚本 |
 
 ## 关键技术特性
 
-### 内核 (6.1.y LTS)
+### 内核 (6.1.177 LTS)
 
-锁定 Linux 6.1.y LTS 内核，原因：
-- S905L3-B 兼容性最佳，ophub 社区 Issue 最多、修复最完善
-- 避免 6.12.y（HDMI NULL pointer 崩溃、网卡驱动缺失）
-- 避免 6.18.y（GPU SError）
+使用 Linux 6.1.177 LTS 内核，来源与流程：
+- ophub 主仓库已移除 6.1.y 镜像 → CI 自动回退到仓库 Release `kernel-6.1-archive` 存档
+- 存档基础镜像: 6.1.150 (jammy, 来自 allonmymind fork)
+- CI 自动升级: 用 `deb-6.1.177.tar.gz` (ophub/kernel 官方) 替换 vmlinuz + uInitrd + DTB + 内核模块
+- 锁定 6.1.y 原因：
+  - S905L3-B 兼容性最佳，ophub 社区 Issue 最多、修复最完善
+  - 避免 6.12.y（HDMI NULL pointer 崩溃、网卡驱动缺失）
+  - 避免 6.18.y（GPU SError）
 
 ### DTB 定制 (V5)
 
@@ -150,6 +158,36 @@ B860AV2.1-A/
 - **initrd 地址修正**: 0x15000000，防止 initramfs 与内核镜像重叠
 - **分区动态检测**: first-boot-check.sh 不再硬编码 /dev/mmcblk0p1/p2，通过 cmdline + findmnt + blkid 动态检测
 
+### U-Boot 启动 Logo (V6.2)
+
+刷机后 U-Boot → 内核 → rootfs 扩容期间存在 1-3 分钟黑屏，用户易误判为变砖。V6.2 在 U-Boot 阶段显示静态 BMP Logo 覆盖黑屏期。
+
+**U-Boot 配置修改**（p212_defconfig 默认不含视频支持）：
+- `CONFIG_VIDEO=y` — DM Video 视频子系统基础
+- `CONFIG_VIDEO_MESON=y` — Amlogic Meson VPU/HDMI 驱动（自动 EDID 检测）
+- `CONFIG_CMD_BMP=y` — `bmp display` 命令
+- `CONFIG_VIDEO_BPP32/16/8=y` — 多色深支持
+- `CONFIG_SYS_WHITE_ON_BLACK=y` — 黑底白字
+
+**Logo 文件**：
+- 格式: BMP3 无压缩, 1280x720, 24-bit (~2.6MB)
+- 位置: boot 分区根目录 `logo.bmp`
+- CI 自动验证: 非 BMP 格式自动转换, 分辨率/色深不符自动压缩
+
+**boot.scr 引导流程**：
+```
+1. 设置默认 devtype/devnum/distro_bootpart (兼容非 bootstd 执行)
+2. load logo.bmp → bmp display (显示 Logo, 失败则跳过)
+3. load uEnv.txt → env import (失败则用回退 bootargs)
+4. load zImage/uInitrd/dtb → booti (启动内核)
+```
+
+**异常处理**：
+- logo.bmp 不存在 → 跳过 Logo, 继续启动
+- uEnv.txt 不存在 → 使用回退 bootargs (root=/dev/mmcblk0p2)
+- U-Boot 无 BMP 支持 → `bmp display` 报错但不中断, 继续启动
+- assets/logo.bmp 不存在 → CI 跳过 Logo 注入, 回退 extlinux.conf 引导
+
 ## 下载
 
 从 [Releases](https://github.com/LIyang-linux/B860AV2.1-A/releases) 下载最新构建。
@@ -158,26 +196,17 @@ B860AV2.1-A/
 
 | 文件 | 大小 | 说明 |
 |------|------|------|
-| b860av21-armbian-burn-v6.1.YYYYMMDD-s905l3b.img.gz | ~750MB | 完整线刷镜像 (USB Burning Tool) |
-| boot.fat32.gz | ~33MB | boot 分区 (手动 dd 用) |
+| b860av21-armbian-burn-v6.3.YYYYMMDD-s905l3b.img.gz | ~750MB | 完整线刷镜像 (USB Burning Tool) |
+| boot.fat32.gz | ~36MB | boot 分区 (含 logo.bmp, 手动 dd 用) |
 | rootfs.ext4.gz | ~715MB | rootfs 分区 (手动 dd 用) |
 | bootloader.PARTITION | ~929KB | FIP bootloader (原厂BL + 主线U-Boot) |
 | checksums.md5 | 237B | MD5 校验文件 |
-
-### 最新构建校验 (v6.1.20260723-s905l3b-d88b332)
-
-```
-dd1ddc0c8b176f1b9935725965324342  b860av21-armbian-burn-v6.1.20260723-s905l3b.img.gz
-640ff44e475326445ea9ee576b35c997  boot.fat32.gz
-ce6e11adaf4e7b97853ead953db90582  rootfs.ext4.gz
-9681ec5b6900e861120767b88719c515  bootloader.PARTITION
-```
 
 ## 使用方法
 
 ### 方法 1: USB Burning Tool 线刷（推荐）
 
-1. 下载 `b860av21-armbian-burn-v6.1.YYYYMMDD-s905l3b.img.gz` 并 gunzip 解压
+1. 下载 `b860av21-armbian-burn-v6.2.YYYYMMDD-s905l3b.img.gz` 并 gunzip 解压
 2. 打开 Amlogic USB Burning Tool v2.1.6
 3. 文件 → 导入烧录包 → 选择解压后的 .img 文件
 4. **必须勾选**:
@@ -207,6 +236,7 @@ sync
 - 串口: ttyAML0, 115200, 8N1
 - 登录: root / 1234（ophub 默认）
 - 首次启动会自动扩展 rootfs 分区
+- 启动时会显示 U-Boot Logo（覆盖黑屏期, 直至内核接管显示）
 
 ### WiFi 使用
 
@@ -259,20 +289,23 @@ cat /var/log/optimize-system.log
 ## CI/CD 构建
 
 GitHub Actions 全自动构建，触发条件：
-- push 到 main 分支（修改 workflow / rootfs-overlay / image.cfg）
+- push 到 main 分支（修改 workflow / rootfs-overlay / image.cfg / logo.bmp）
 - 手动触发 (Actions → Run workflow)
 
 构建流程：
-1. 编译主线 U-Boot v2025.04 (p212_defconfig)
-2. 从原厂 fip_backup.img 提取 BL2/BL30/BL31
-3. 用 gxlimg 重新打包 FIP (原厂 BL + 主线 U-Boot)
-4. 下载 ophub S905L3-B Armbian 镜像 (内核 6.1.y 过滤)
-5. 提取 boot 分区，创建 64MB FAT32 boot.PARTITION
-6. 创建 B860AV2.1-A 专用 DTB (eMMC 时序修复)
-7. 提取并缩小 rootfs，注入自定义脚本和 WiFi 固件
-8. tune2fs 优化 + UUID 修正
-9. 打包完整 Amlogic 线刷镜像
-10. 上传 Artifact 和 Release
+1. 验证并准备 Logo (assets/logo.bmp → BMP3 1280x720 24-bit)
+2. 编译主线 U-Boot v2025.04 (p212_defconfig + VIDEO_MESON + CMD_BMP)
+3. 从原厂 fip_backup.img 提取 BL2/BL30/BL31
+4. 用 gxlimg 重新打包 FIP (原厂 BL + 主线 U-Boot)
+5. 下载 ophub S905L3-B Armbian 镜像 (6.1.y 回退到仓库 Release 存档)
+6. V6.3: 用 deb-6.1.177 升级内核 (vmlinuz + uInitrd + DTB + 模块)
+7. 提取 boot 分区，创建 64MB FAT32 boot.PARTITION
+8. 复制 logo.bmp + 生成 boot.scr (含 BMP 显示命令)
+9. 创建 B860AV2.1-A 专用 DTB (eMMC 时序修复)
+10. 提取并缩小 rootfs，替换内核模块，注入自定义脚本和 WiFi 固件
+11. tune2fs 优化 + UUID 修正
+12. 打包完整 Amlogic 线刷镜像
+13. 上传 Artifact 和 Release
 
 ### 构建参数
 
