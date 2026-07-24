@@ -71,7 +71,7 @@ ACTUAL_UUID=""
 if [ -n "$ROOT_DEV" ] && [ -b "$ROOT_DEV" ]; then
     ACTUAL_UUID=$(blkid -s UUID -o value "$ROOT_DEV" 2>/dev/null)
 fi
-CMDLINE_UUID=$(cat /proc/cmdline 2>/dev/null | grep -oP 'root=UUID=\K[a-f0-9-]+')
+CMDLINE_UUID=$(cat /proc/cmdline 2>/dev/null | grep -oiP 'root=UUID=\K[a-f0-9-]+' | head -1)
 
 log "Actual rootfs UUID: $ACTUAL_UUID"
 log "Cmdline root UUID: $CMDLINE_UUID"
@@ -79,10 +79,11 @@ log "Cmdline root UUID: $CMDLINE_UUID"
 if [ -n "$ACTUAL_UUID" ] && [ -n "$CMDLINE_UUID" ] && [ "$ACTUAL_UUID" != "$CMDLINE_UUID" ]; then
     log "WARNING: UUID mismatch detected! Fixing boot config..."
     mkdir -p /tmp/boot-check
-    if [ -n "$BOOT_DEV" ] && mount "$BOOT_DEV" /tmp/boot-check 2>/dev/null; then
+    # V6.4.1 fix: 指定 -t vfat 避免自动检测失败 (部分系统自动检测可能不识别 FAT16)
+    if [ -n "$BOOT_DEV" ] && mount -t vfat "$BOOT_DEV" /tmp/boot-check 2>/dev/null; then
         for f in /tmp/boot-check/uEnv.txt /tmp/boot-check/extlinux/extlinux.conf; do
             if [ -f "$f" ]; then
-                sed -i "s/root=UUID=[a-f0-9-]*/root=UUID=$ACTUAL_UUID/g" "$f"
+                sed -i "s/root=UUID=[a-fA-F0-9-]*/root=UUID=$ACTUAL_UUID/g" "$f"
                 log "  Fixed: $f"
             fi
         done

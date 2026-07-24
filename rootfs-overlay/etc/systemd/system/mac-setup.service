@@ -2,6 +2,7 @@
 Description=MAC Address Setup from U-Boot Env
 After=sys-subsystem-net-devices-eth0.device
 Before=fix-gxl-eth.service network.target
+ConditionPathExists=/usr/local/bin/mac-setup.sh
 
 [Service]
 Type=oneshot

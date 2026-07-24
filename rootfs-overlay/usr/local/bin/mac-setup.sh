@@ -39,8 +39,9 @@ if [ "$CURRENT_MAC" = "00:00:00:00:00:00" ] || [ -z "$CURRENT_MAC" ]; then
     SERIAL=$(cat /proc/device-tree/serial-number 2>/dev/null | tr -d '\0')
     if [ -n "$SERIAL" ]; then
         # 取序列号哈希的前5字节, 首字节设为 02 (本地管理地址)
+        # V6.4.1 fix: 移除冗余的第三次 sed 替换 (原第三步是 no-op)
         HASH=$(echo "$SERIAL" | md5sum | cut -c1-10)
-        MAC="02:$(echo $HASH | sed 's/\(..\)/\1:/g; s/:$//; s/\(..\):\(..\):\(..\):\(..\):\(..\)/\1:\2:\3:\4:\5/')"
+        MAC="02:$(echo $HASH | sed 's/\(..\)/\1:/g; s/:$//')"
     else
         # 随机生成
         MAC=$(printf '02:%02x:%02x:%02x:%02x:%02x' $((RANDOM%256)) $((RANDOM%256)) $((RANDOM%256)) $((RANDOM%256)) $((RANDOM%256)))

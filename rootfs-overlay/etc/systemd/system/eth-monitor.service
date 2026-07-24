@@ -2,6 +2,7 @@
 Description=Ethernet Link Monitor (GXL PHY LPA Watchdog)
 Documentation=https://github.com/LIyang-linux/B860AV2.1-A
 After=network.target fix-gxl-eth.service
+ConditionPathExists=/usr/local/bin/eth-monitor.sh
 
 [Service]
 Type=simple

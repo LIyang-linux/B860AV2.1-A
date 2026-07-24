@@ -200,6 +200,8 @@ vm.dirty_ratio = 15
 vm.dirty_expire_centisecs = 3000
 vm.dirty_writeback_centisecs = 6000
 vm.vfs_cache_pressure = 50
+# V6.4.1 fix: 持久化 swappiness (zram 优先, 磁盘 swap 次之)
+vm.swappiness = 60
 EOF
     log "  Persisted to $sysctl_file"
 }
@@ -227,7 +229,9 @@ RuntimeMaxUse=20M
 RuntimeMaxFileSize=5M
 EOF
         log "  journald: volatile storage, 50M max"
-        systemctl restart systemd-journald 2>/dev/null || true
+        # V6.4.1 fix: 使用 reload 而非 restart, 避免启动期间重启 journald 导致日志丢失
+        # restart 会中断当前所有日志流, reload 只重新加载配置
+        systemctl reload systemd-journald 2>/dev/null || true
     fi
 }
 

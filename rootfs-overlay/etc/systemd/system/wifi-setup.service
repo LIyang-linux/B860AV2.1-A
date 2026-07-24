@@ -2,12 +2,14 @@
 Description=B860AV2.1-A WiFi Auto-Detection and Setup
 After=NetworkManager.service fix-gxl-eth.service
 Wants=NetworkManager.service
+ConditionPathExists=/usr/local/bin/wifi-setup.sh
 
 [Service]
 Type=oneshot
 ExecStart=/usr/local/bin/wifi-setup.sh
 RemainAfterExit=yes
-TimeoutStartSec=30
+# V6.4.1 fix: 30s 可能不够 (加载 30+ 驱动 + 等待接口出现), 增加到 60s
+TimeoutStartSec=60
 StandardOutput=journal+console
 StandardError=journal+console
 

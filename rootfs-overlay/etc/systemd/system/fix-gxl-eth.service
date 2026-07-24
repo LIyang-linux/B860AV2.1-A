@@ -1,10 +1,12 @@
 [Unit]
 Description=Fix Amlogic GXL Internal PHY LPA Corruption
 Documentation=https://github.com/LIyang-linux/B860AV2.1-A
-After=sys-subsystem-net-devices-eth0.device
-Before=network.target network-manager.service
+# V6.4.1 fix: 合并重复的 After= 指令 (多行 After= 虽然是累加的, 但容易导致维护混乱)
+# V6.4.1 fix: network-manager.service → NetworkManager.service (规范服务名, 与 wifi-setup.service 保持一致)
+After=sys-subsystem-net-devices-eth0.device network-pre.target
+Before=network.target NetworkManager.service
 Wants=network-pre.target
-After=network-pre.target
+ConditionPathExists=/usr/local/bin/fix-gxl-eth.sh
 
 [Service]
 Type=oneshot

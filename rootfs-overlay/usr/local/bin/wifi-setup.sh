@@ -191,12 +191,11 @@ configure_networkmanager() {
         log "  WiFi scan triggered"
 
         # List available networks
-        local networks=$(nmcli -t device wifi list 2>/dev/null | head -10)
+        # V6.4.1 fix: 使用 -f 指定字段而非 cut 解析, 避免SSID含冒号时解析错误
+        local networks=$(nmcli -t -f SSID,SIGNAL device wifi list 2>/dev/null | head -10)
         if [ -n "$networks" ]; then
             log "  Available networks:"
-            echo "$networks" | while IFS= read -r line; do
-                local ssid=$(echo "$line" | cut -d: -f1)
-                local signal=$(echo "$line" | cut -d: -f3)
+            echo "$networks" | while IFS=: read -r ssid signal; do
                 log "    SSID: $ssid (signal: $signal)"
             done
         else

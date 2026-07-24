@@ -111,17 +111,42 @@ else
     log "  Install with: apt install libglapi-mesa"
 fi
 
+# V6.4.1: 检查 libLLVM (Mesa 23.x gallium 驱动的运行时依赖)
+LLVM_LIB=$(find /usr/lib -name "libLLVM-*.so*" 2>/dev/null | head -1)
+if [ -n "$LLVM_LIB" ]; then
+    log "  libLLVM found: $LLVM_LIB"
+else
+    log "  WARNING: libLLVM not found"
+    log "  Mesa gallium drivers (including lima) require libllvm15 at runtime"
+    log "  GPU acceleration will NOT work without LLVM"
+    log "  Install with: apt install libllvm15"
+fi
+
+# V6.4.1: 检查 libzstd (Mesa 运行时依赖)
+ZSTD_LIB=$(find /usr/lib -name "libzstd.so*" 2>/dev/null | head -1)
+if [ -n "$ZSTD_LIB" ]; then
+    log "  libzstd found: $ZSTD_LIB"
+else
+    log "  WARNING: libzstd not found"
+    log "  Mesa may require libzstd1 for compressed shader cache"
+fi
+
 # 5. 设置 LIBGL_DRIVERS_PATH (确保 Mesa 能找到 DRI 驱动)
-DRI_DIR=$(dirname "$LIMA_DRI" 2>/dev/null)
-if [ -n "$DRI_DIR" ] && [ -d "$DRI_DIR" ]; then
-    # 写入环境变量配置文件
-    echo "LIBGL_DRIVERS_PATH=$DRI_DIR" > /etc/profile.d/gpu-lima.sh
-    echo "export LIBGL_DRIVERS_PATH" >> /etc/profile.d/gpu-lima.sh
-    chmod 644 /etc/profile.d/gpu-lima.sh
-    log "  LIBGL_DRIVERS_PATH set to: $DRI_DIR"
-    # 列出 DRI 目录中的驱动
-    DRI_COUNT=$(ls "$DRI_DIR"/*_dri.so 2>/dev/null | wc -l)
-    log "  DRI drivers available: $DRI_COUNT"
+# V6.4.1 fix: 仅在 LIMA_DRI 非空时设置 DRI_DIR, 避免 dirname "" 返回 "." 误通过检查
+if [ -n "$LIMA_DRI" ]; then
+    DRI_DIR=$(dirname "$LIMA_DRI")
+    if [ -n "$DRI_DIR" ] && [ -d "$DRI_DIR" ]; then
+        # 写入环境变量配置文件
+        echo "LIBGL_DRIVERS_PATH=$DRI_DIR" > /etc/profile.d/gpu-lima.sh
+        echo "export LIBGL_DRIVERS_PATH" >> /etc/profile.d/gpu-lima.sh
+        chmod 644 /etc/profile.d/gpu-lima.sh
+        log "  LIBGL_DRIVERS_PATH set to: $DRI_DIR"
+        # 列出 DRI 目录中的驱动
+        DRI_COUNT=$(ls "$DRI_DIR"/*_dri.so 2>/dev/null | wc -l)
+        log "  DRI drivers available: $DRI_COUNT"
+    fi
+else
+    log "  LIBGL_DRIVERS_PATH not set (lima_dri.so not found)"
 fi
 
 # 6. 检查设备树 GPU 节点
@@ -161,13 +186,15 @@ LIMA_LOADED=$(lsmod | grep -c "^lima")
 DRI_PRESENT=$([ -d /dev/dri ] && echo "yes" || echo "no")
 MESA_PRESENT=$([ -n "$LIMA_DRI" ] && echo "yes" || echo "no")
 GLAPI_PRESENT=$([ -n "$GLAPI_LIB" ] && echo "yes" || echo "no")
+LLVM_PRESENT=$([ -n "$LLVM_LIB" ] && echo "yes" || echo "no")
 
 log "  Kernel lima module: $([ $LIMA_LOADED -gt 0 ] && echo 'LOADED' || echo 'NOT LOADED')"
 log "  DRM device nodes: $DRI_PRESENT"
 log "  Mesa lima_dri.so: $MESA_PRESENT"
 log "  Mesa libglapi.so: $GLAPI_PRESENT"
+log "  libLLVM (runtime): $LLVM_PRESENT"
 
-if [ $LIMA_LOADED -gt 0 ] && [ "$DRI_PRESENT" = "yes" ] && [ "$MESA_PRESENT" = "yes" ] && [ "$GLAPI_PRESENT" = "yes" ]; then
+if [ $LIMA_LOADED -gt 0 ] && [ "$DRI_PRESENT" = "yes" ] && [ "$MESA_PRESENT" = "yes" ] && [ "$GLAPI_PRESENT" = "yes" ] && [ "$LLVM_PRESENT" = "yes" ]; then
     log "  >>> GPU acceleration is READY <<<"
     log "  Install a desktop (apt install xfce4) to use GPU-accelerated rendering"
 else

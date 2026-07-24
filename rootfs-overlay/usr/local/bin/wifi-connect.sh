@@ -77,6 +77,7 @@ do_connect() {
 
     echo "Connecting to '$ssid' on $iface..."
 
+    # V6.4.1 fix: 正确处理隐藏开放网络 (hidden + 无密码)
     if [ -n "$pass" ]; then
         if [ "$hidden" = "hidden" ]; then
             nmcli device wifi connect "$ssid" password "$pass" hidden yes 2>/dev/null
@@ -84,7 +85,11 @@ do_connect() {
             nmcli device wifi connect "$ssid" password "$pass" 2>/dev/null
         fi
     else
-        nmcli device wifi connect "$ssid" 2>/dev/null
+        if [ "$hidden" = "hidden" ]; then
+            nmcli device wifi connect "$ssid" hidden yes 2>/dev/null
+        else
+            nmcli device wifi connect "$ssid" 2>/dev/null
+        fi
     fi
 
     if [ $? -eq 0 ]; then

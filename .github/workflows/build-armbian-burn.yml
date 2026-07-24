@@ -937,7 +937,10 @@ jobs:
             libxxf86vm1:arm64 \
             libxcb-dri2-0:arm64 \
             libxcb-dri3-0:arm64 \
-            libxcb-glx0:arm64; do
+            libxcb-glx0:arm64 \
+            libllvm15:arm64 \
+            libzstd1:arm64 \
+            libelf1:arm64; do
             apt-get download "$pkg" 2>/dev/null && echo "    OK: $pkg" || echo "    SKIP: $pkg (not found or already satisfied)"
           done
 
@@ -1016,9 +1019,14 @@ jobs:
               # gpu-setup.sh 在首次启动时会再次运行 ldconfig 作为保障
               echo "  Library paths configured, ldconfig will run on first boot"
             fi
+
+            # V6.4.1 fix: chroot/sudo 操作可能破坏 /dev/null 权限, 立即修复
+            # 否则后续所有 2>/dev/null 重定向都会失败, 导致验证误报
+            sudo chmod 666 /dev/null 2>/dev/null || true
+
             # 验证关键库文件存在
             echo "  Verifying key Mesa libraries..."
-            for lib in libglapi.so libGL.so libEGL.so libGLESv2.so libgbm.so libdrm.so; do
+            for lib in libglapi.so libGL.so libEGL.so libGLESv2.so libgbm.so libdrm.so libLLVM-15.so libzstd.so; do
               FOUND=$(sudo find /mnt/rootfs/usr/lib -name "${lib}*" 2>/dev/null | head -1)
               if [ -n "$FOUND" ]; then
                 echo "    OK: $lib -> $(echo $FOUND | sed 's|/mnt/rootfs||')"
@@ -1090,6 +1098,8 @@ jobs:
           sudo chmod 644 /mnt/rootfs/etc/systemd/system/*.service 2>/dev/null
 
           # 验证注入的文件 (使用 sudo 避免 /dev/null 权限问题)
+          # V6.4.1 fix: 确保 /dev/null 权限正确 (sudo/chroot 操作可能破坏)
+          sudo chmod 666 /dev/null 2>/dev/null || true
           echo "=== Injected files verification ==="
           sudo ls -la /mnt/rootfs/usr/local/bin/fix-gxl-eth.sh || echo "MISSING: fix-gxl-eth.sh"
           sudo ls -la /mnt/rootfs/usr/local/bin/eth-monitor.sh || echo "MISSING: eth-monitor.sh"

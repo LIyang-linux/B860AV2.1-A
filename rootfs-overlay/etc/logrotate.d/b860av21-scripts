@@ -1,11 +1,12 @@
 # B860AV2.1-A 自定义脚本日志轮转
 # 防止日志文件无限增长占满 eMMC
 
+# V6.4.1 fix: 移除 eth-monitor.log 和 mac-setup.log
+# 这两个脚本通过 systemd journal 输出日志, 不写入文件
 /var/log/first-boot-check.log
 /var/log/optimize-system.log
 /var/log/wifi-setup.log
-/var/log/eth-monitor.log
-/var/log/mac-setup.log {
+/var/log/gpu-setup.log {
     weekly
     rotate 2
     maxsize 1M
